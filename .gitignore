@@ -1,0 +1,14 @@
+data/
+datasets/
+models/
+checkpoints/
+outputs/
+wandb/
+.cache/
+__pycache__/
+*.pyc
+*.pt
+*.pth
+*.safetensors
+.DS_Store
+.env
