@@ -31,11 +31,10 @@ Activate for later runs:
 
 ```bash
 source scripts/env.sh
-conda activate "$R2F_CONDA_ENV"
+conda activate zxc_r2f
 ```
 
-The environment directory is `conda_envs/zxc_r2f` and the effective environment
-name/path is `zxc_r2f`.
+The conda environment name is `zxc_r2f`.
 
 ## Smoke Test
 
@@ -43,7 +42,7 @@ After confirming model and data paths in `configs/r2f_tofu_llama.yaml`, run:
 
 ```bash
 source scripts/env.sh
-conda activate "$R2F_CONDA_ENV"
+conda activate zxc_r2f
 bash scripts/run_tofu_r2f_smoke.sh
 ```
 
@@ -55,7 +54,7 @@ a small subset.
 
 ```bash
 source scripts/env.sh
-conda activate "$R2F_CONDA_ENV"
+conda activate zxc_r2f
 bash scripts/run_tofu_r2f_full.sh
 ```
 

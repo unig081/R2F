@@ -2,7 +2,8 @@
 # This file is meant to be sourced. Do not mutate the caller's shell options.
 
 export R2F_ROOT="${R2F_ROOT:-/mnt/data1/zxc/R2F}"
-export R2F_CONDA_ENV="${R2F_CONDA_ENV:-${R2F_ROOT}/conda_envs/zxc_r2f}"
+export R2F_CONDA_ENV_NAME="${R2F_CONDA_ENV_NAME:-zxc_r2f}"
+export R2F_CONDA_ENV="${R2F_CONDA_ENV:-${R2F_CONDA_ENV_NAME}}"
 export R2F_OUTPUT_DIR="${R2F_OUTPUT_DIR:-${R2F_ROOT}/results}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${R2F_ROOT}/cache/datasets}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${R2F_ROOT}/cache/transformers}"
