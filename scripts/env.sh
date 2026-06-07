@@ -9,6 +9,8 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${R2F_ROOT}/cache/transformers}
 export HF_HOME="${HF_HOME:-${R2F_ROOT}/cache/huggingface}"
 export TORCH_HOME="${TORCH_HOME:-${R2F_ROOT}/cache/torch}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${R2F_ROOT}/cache/pip}"
+export PYTHONNOUSERSITE=1
+export PIP_USER=false
 export PYTHONPATH="${R2F_ROOT}/src:${PYTHONPATH:-}"
 
 for p in \
