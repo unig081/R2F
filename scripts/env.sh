@@ -14,6 +14,7 @@ export PYTHONPATH="${R2F_ROOT}/src:${PYTHONPATH:-}"
 for p in \
   "${R2F_ROOT}/models/llama_3_2_1B_instruct_tofu" \
   "/mnt/data1/zxc/models/llama_3_2_1B_instruct_tofu" \
+  "/mnt/data1/zxc/handoff/junior_llama_tofu_eval_bundle/models/llama_3_2_1B_instruct_tofu" \
   "/mnt/data1/zxc/zxc_r2f/models/llama_3_2_1B_instruct_tofu"; do
   if [ -d "${p}" ] && [ -z "${R2F_SOURCE_MODEL:-}" ]; then
     export R2F_SOURCE_MODEL="${p}"
@@ -23,6 +24,7 @@ done
 for p in \
   "${R2F_ROOT}/models/llama_3_2_3B_instruct_tofu" \
   "/mnt/data1/zxc/models/llama_3_2_3B_instruct_tofu" \
+  "/mnt/data1/zxc/handoff/junior_llama_tofu_eval_bundle/models/llama_3_2_3B_instruct_tofu" \
   "/mnt/data1/zxc/zxc_r2f/models/llama_3_2_3B_instruct_tofu"; do
   if [ -d "${p}" ] && [ -z "${R2F_TARGET_MODEL:-}" ]; then
     export R2F_TARGET_MODEL="${p}"
@@ -32,6 +34,7 @@ done
 for p in \
   "${R2F_ROOT}/datasets/tofu/forget05.json" \
   "/mnt/data1/zxc/datasets/tofu/forget05.json" \
+  "/mnt/data1/zxc/handoff/junior_llama_tofu_eval_bundle/datasets/tofu/forget05.json" \
   "/mnt/data1/zxc/zxc_r2f/datasets/tofu/forget05.json"; do
   if [ -f "${p}" ] && [ -z "${R2F_FORGET_FILE:-}" ]; then
     export R2F_FORGET_FILE="${p}"
@@ -41,6 +44,7 @@ done
 for p in \
   "${R2F_ROOT}/datasets/tofu/retain95.json" \
   "/mnt/data1/zxc/datasets/tofu/retain95.json" \
+  "/mnt/data1/zxc/handoff/junior_llama_tofu_eval_bundle/datasets/tofu/retain95.json" \
   "/mnt/data1/zxc/zxc_r2f/datasets/tofu/retain95.json"; do
   if [ -f "${p}" ] && [ -z "${R2F_RETAIN_FILE:-}" ]; then
     export R2F_RETAIN_FILE="${p}"

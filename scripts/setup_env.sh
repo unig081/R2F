@@ -14,11 +14,10 @@ source "${CONDA_SH}"
 
 mkdir -p "${R2F_ROOT}/conda_envs"
 if [ ! -d "${R2F_CONDA_ENV}" ]; then
-  conda env create -p "${R2F_CONDA_ENV}" -f "${R2F_ROOT}/environment.yml"
-else
-  conda env update -p "${R2F_CONDA_ENV}" -f "${R2F_ROOT}/environment.yml" --prune
+  conda create -y -p "${R2F_CONDA_ENV}" python=3.11 pip
 fi
 
+conda env update -p "${R2F_CONDA_ENV}" -f "${R2F_ROOT}/environment.yml" --prune
 conda activate "${R2F_CONDA_ENV}"
 python -m pip install -e "${R2F_ROOT}"
 python - <<'PY'
