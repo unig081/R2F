@@ -74,6 +74,10 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         deep_set(cfg, "unlearning.train_layers", smoke["train_layers"])
     if "decoder_steps" in smoke:
         deep_set(cfg, "decoder.max_steps", smoke["decoder_steps"])
+    if "r2f_lora_steps" in smoke:
+        deep_set(cfg, "r2f.lora_steps", smoke["r2f_lora_steps"])
+    if "r2f_gradient_capture_steps" in smoke:
+        deep_set(cfg, "r2f.gradient_capture_steps", smoke["r2f_gradient_capture_steps"])
     if "r2f_eta_grid" in smoke:
         deep_set(cfg, "r2f.eta_grid", smoke["r2f_eta_grid"])
     if "eval_max_forget" in smoke:

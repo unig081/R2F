@@ -1,8 +1,8 @@
 1.已经有了tofu微调过的llama 1B和llama 3B
-2.使用tofu数据集用ga+gd 对llama 1B分别做lora和全参Unlearning
+2.使用tofu数据集用ga+gd 对llama 1B分别做lora Unlearning和全参 Unlearning
 3.记录lora和全参梯度
 4.用梯度数据训练gradient decoder
-5.用ga+gd对llama 3B做lora微调，记录lora梯度
+5.用ga+gd对tofu微调过的llama 3B做lora微调，记录lora梯度
 6.把lora梯度输入 利用 gradient decoder输出全参梯度
 
 
@@ -34,8 +34,8 @@ decoder(A[:, i], B[o, :], dA[:, i], dB[o, :], layer 信息, module 类型)
 1. 用 TOFU 数据对 LLaMA 1B 做 LoRA GA+GD unlearning，记录 A/B/dA/dB。
 2. 用同一批 TOFU 数据对 LLaMA 1B 做 Transformer dense weight GA+GD unlearning，记录 dW。
 3. 用 1B 的梯度配对样本训练 coordinate-wise gradient decoder。
-4. 用 TOFU 数据对 LLaMA 3B 做 LoRA GA+GD，记录 3B 的 A/B/dA/dB。
-5. 把 3B LoRA 梯度输入 decoder，输出预测的 3B Transformer dense weight 梯度 dW_hat。
+4. 用 TOFU 数据对 LLaMA 3B 做 LoRA GA+GD 微调；微调完成后固定 LoRA 权重，再累计记录 3B 的 A/B/dA/dB。
+5. 把 3B LoRA 梯度输入 decoder，输出并保存预测的 3B Transformer dense weight 梯度 dW_hat。
 6. 用 dW_hat 更新 LLaMA 3B 的 Transformer dense weights，完成 R2F unlearning。
 
 
@@ -328,12 +328,12 @@ decoder 输出：
 
 1. 加载 LLaMA 3B TOFU 模型。
 2. 注入和 1B 相同 rank、alpha、target_modules 的 LoRA。
-3. 对 TOFU forget/retain batch 计算 GA+GD loss。
-4. backward 后只记录 3B LoRA 的 A/B/dA/dB。
+3. 对 TOFU forget/retain batch 计算 GA+GD loss 并微调 LoRA adapter。
+4. 微调完成后固定 LoRA 权重，用若干 TOFU forget/retain batch 累计 GA+GD 梯度，记录 3B LoRA 的 A/B/dA/dB。
 5. 对每个目标 Transformer dense weight 分块枚举 coordinate (o, i)。
 6. 用 3B 的 A/B/dA/dB 构造 decoder input features。
 7. 加载 1B 训练好的 gradient decoder。
-8. 预测 dW_hat[o, i]。
+8. 预测并保存 dW_hat[o, i]。
 9. 按模块反归一化并重建 dense gradient block。
 10. 更新 3B 目标 Transformer dense weights。
 
@@ -360,8 +360,9 @@ loss = gamma * (-CE_forget) + alpha * CE_retain
 
 输出：
 
-- results/r2f_3b/dense_delta.pt
-- results/r2f_3b/updated_model/
+- results/r2f_3b/eta_*/dense_gradient.pt
+- results/r2f_3b/eta_*/dense_delta.pt
+- results/r2f_3b/eta_*/updated_model/
 - results/r2f_3b/update_stats.json
 
 

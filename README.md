@@ -48,8 +48,9 @@ bash scripts/run_tofu_r2f_smoke.sh
 ```
 
 The smoke test captures 1B LoRA and dense gradient pairs, trains a tiny decoder,
-applies one R2F update to 3B, and evaluates Base-3B / LoRA-GA+GD-3B / R2F-3B on
-a small subset.
+runs a short 3B LoRA GA+GD pass to capture decoder inputs, predicts dense
+`dW_hat`, applies one R2F update to 3B, and evaluates Base-3B / LoRA-GA+GD-3B /
+R2F-3B on a small subset.
 
 ## Full Run
 
@@ -60,4 +61,6 @@ bash scripts/run_tofu_r2f_full.sh
 ```
 
 Outputs are written under `results/`, reports under `reports/`, and logs under
-`logs/`.
+`logs/`. R2F gradient shards are stored under
+`results/r2f_3b/eta_*/predicted_dense_gradient_shards/`; dense deltas are
+derived as `dense_delta = -eta * dW_hat`.

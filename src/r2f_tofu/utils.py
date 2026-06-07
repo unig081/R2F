@@ -97,6 +97,18 @@ def cuda_memory_summary() -> dict[str, float]:
     }
 
 
+def accumulation_group_size(step: int, total_steps: int, grad_accum_steps: int) -> int:
+    grad_accum_steps = max(int(grad_accum_steps), 1)
+    group_start = ((int(step) - 1) // grad_accum_steps) * grad_accum_steps + 1
+    group_end = min(group_start + grad_accum_steps - 1, int(total_steps))
+    return max(group_end - group_start + 1, 1)
+
+
+def is_accumulation_boundary(step: int, total_steps: int, grad_accum_steps: int) -> bool:
+    grad_accum_steps = max(int(grad_accum_steps), 1)
+    return int(step) % grad_accum_steps == 0 or int(step) >= int(total_steps)
+
+
 class Timer:
     def __init__(self) -> None:
         self.start = time.time()

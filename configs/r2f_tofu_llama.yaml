@@ -62,6 +62,8 @@ decoder:
 
 r2f:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/r2f_3b
+  lora_steps: 512
+  gradient_capture_steps: 8
   eta_grid:
     - 1.0e-6
     - 3.0e-6
@@ -69,7 +71,6 @@ r2f:
     - 3.0e-5
   block_rows: 512
   save_updated_model: true
-  max_steps: 1
 
 evaluation:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/eval
@@ -88,6 +89,8 @@ smoke:
     - 0
   coords_per_module: 256
   decoder_steps: 20
+  r2f_lora_steps: 2
+  r2f_gradient_capture_steps: 1
   r2f_eta_grid:
     - 1.0e-6
   eval_max_forget: 2
