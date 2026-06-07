@@ -14,7 +14,6 @@ from .decoder import GradientDecoder
 from .grad_capture import capture_lora_gradients, save_shape_report, shape_report_from_records
 from .losses import ga_gd_loss
 from .models import (
-    add_lora,
     get_model_device,
     infer_num_layers,
     load_causal_lm,
@@ -24,10 +23,8 @@ from .models import (
 )
 from .module_keys import ModuleKey
 from .utils import (
-    accumulation_group_size,
     cuda_memory_summary,
     ensure_dir,
-    is_accumulation_boundary,
     move_to_device,
     set_seed,
     write_json,
@@ -175,7 +172,7 @@ def _predict_and_update_param(
     }
 
 
-def _train_and_capture_target_lora_gradients(
+def _load_and_capture_target_lora_gradients(
     cfg: dict[str, Any],
 ) -> tuple[dict[ModuleKey, dict[str, torch.Tensor]], int, dict[str, Any]]:
     target_model = str(deep_get(cfg, "paths.target_model"))
@@ -184,28 +181,22 @@ def _train_and_capture_target_lora_gradients(
     target_modules = list(deep_get(cfg, "unlearning.target_modules"))
     train_layers = deep_get(cfg, "unlearning.train_layers")
     train_modules = deep_get(cfg, "unlearning.train_modules")
-    lora_steps = int(deep_get(cfg, "r2f.lora_steps", deep_get(cfg, "unlearning.max_steps", 512)))
+    output_root = Path(deep_get(cfg, "paths.output_dir"))
+    adapter_dir = Path(deep_get(cfg, "r2f.lora_adapter_path", output_root / "lora_gagd_3b" / "adapter"))
     capture_steps = int(
         deep_get(cfg, "r2f.gradient_capture_steps", deep_get(cfg, "unlearning.grad_accum_steps", 1))
     )
-    grad_accum_steps = max(1, int(deep_get(cfg, "unlearning.grad_accum_steps", 1)))
-    if lora_steps < 1:
-        raise ValueError("r2f.lora_steps must be >= 1")
     if capture_steps < 1:
         raise ValueError("r2f.gradient_capture_steps must be >= 1")
+    if not (adapter_dir / "adapter_config.json").exists():
+        raise FileNotFoundError(
+            f"Expected 3B LoRA adapter from the first full-run step at {adapter_dir}. "
+            "Run r2f_tofu.unlearn_lora before r2f_tofu.apply_r2f."
+        )
 
     tokenizer = load_tokenizer(
         target_model,
         trust_remote_code=bool(deep_get(cfg, "model.trust_remote_code", True)),
-    )
-    train_loader = build_paired_loader(
-        tokenizer=tokenizer,
-        forget_file=forget_file,
-        retain_file=retain_file,
-        max_length=int(deep_get(cfg, "model.max_length", 1024)),
-        batch_size=int(deep_get(cfg, "unlearning.batch_size", 1)),
-        max_forget_samples=lora_steps,
-        seed=int(cfg.get("seed", 42)) + 17,
     )
     base = load_causal_lm(
         target_model,
@@ -214,13 +205,10 @@ def _train_and_capture_target_lora_gradients(
         trust_remote_code=bool(deep_get(cfg, "model.trust_remote_code", True)),
         attn_implementation=deep_get(cfg, "model.attn_implementation"),
     )
-    lora_model = add_lora(
-        base,
-        target_modules=target_modules,
-        r=int(deep_get(cfg, "lora.r", 8)),
-        lora_alpha=int(deep_get(cfg, "lora.alpha", 16)),
-        lora_dropout=float(deep_get(cfg, "lora.dropout", 0.0)),
-    )
+
+    from peft import PeftModel
+
+    lora_model = PeftModel.from_pretrained(base, adapter_dir, is_trainable=True)
     set_lora_trainable_filter(
         lora_model,
         target_modules,
@@ -231,47 +219,8 @@ def _train_and_capture_target_lora_gradients(
     if not trainable:
         raise RuntimeError("No 3B LoRA parameters are trainable for R2F capture")
     device = get_model_device(lora_model)
-    optimizer = torch.optim.AdamW(
-        trainable,
-        lr=float(deep_get(cfg, "unlearning.lora_learning_rate", 1e-4)),
-    )
-    lora_model.train()
-    total_train_steps = min(len(train_loader), lora_steps)
-    optimizer_steps = 0
-    train_losses: list[dict[str, float]] = []
-    optimizer.zero_grad(set_to_none=True)
-
-    for step, batch in enumerate(tqdm(train_loader, desc="3B LoRA GA+GD for R2F"), start=1):
-        if step > lora_steps:
-            break
-        batch = move_to_device(batch, device)
-        loss, _metrics = ga_gd_loss(
-            lora_model,
-            batch,
-            gamma=float(deep_get(cfg, "unlearning.gamma", 1.0)),
-            alpha=float(deep_get(cfg, "unlearning.alpha", 1.0)),
-        )
-        group_size = accumulation_group_size(step, total_train_steps, grad_accum_steps)
-        (loss / group_size).backward()
-        if is_accumulation_boundary(step, total_train_steps, grad_accum_steps):
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            optimizer_steps += 1
-        train_losses.append(
-            {
-                "step": step,
-                "optimizer_steps": optimizer_steps,
-                "grad_accum_group_size": group_size,
-                **_metrics,
-            }
-        )
-
     target_num_layers = infer_num_layers(lora_model)
     output_dir = ensure_dir(deep_get(cfg, "r2f.output_dir"))
-    adapter_dir = ensure_dir(output_dir / "lora_gagd_3b_for_r2f_adapter")
-    lora_model.save_pretrained(adapter_dir)
-    tokenizer.save_pretrained(adapter_dir)
 
     capture_loader = build_paired_loader(
         tokenizer=tokenizer,
@@ -286,7 +235,7 @@ def _train_and_capture_target_lora_gradients(
     capture_losses: list[dict[str, float]] = []
     lora_model.train()
     lora_model.zero_grad(set_to_none=True)
-    capture_iter = tqdm(capture_loader, desc="3B LoRA gradient capture for decoder")
+    capture_iter = tqdm(capture_loader, desc="3B LoRA gradient capture from saved adapter")
     for step, batch in enumerate(capture_iter, start=1):
         if step > capture_steps:
             break
@@ -315,11 +264,8 @@ def _train_and_capture_target_lora_gradients(
     stats = {
         "target_model": target_model,
         "adapter_dir": str(adapter_dir),
-        "lora_train_micro_steps": total_train_steps,
-        "lora_optimizer_steps": optimizer_steps,
-        "grad_accum_steps": grad_accum_steps,
+        "adapter_source": "results/lora_gagd_3b/adapter",
         "gradient_capture_steps": total_capture_steps,
-        "train_losses_tail": train_losses[-20:],
         "capture_losses": capture_losses,
         "captured_modules": [
             key.as_string()
@@ -344,7 +290,7 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
         lora_records,
         target_num_layers,
         lora_gradient_stats,
-    ) = _train_and_capture_target_lora_gradients(cfg)
+    ) = _load_and_capture_target_lora_gradients(cfg)
     eta_grid = [float(x) for x in deep_get(cfg, "r2f.eta_grid", [1e-6])]
     target_model = str(deep_get(cfg, "paths.target_model"))
     target_modules = list(deep_get(cfg, "unlearning.target_modules"))

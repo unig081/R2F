@@ -48,9 +48,9 @@ bash scripts/run_tofu_r2f_smoke.sh
 ```
 
 The smoke test captures 1B LoRA and dense gradient pairs, trains a tiny decoder,
-runs a short 3B LoRA GA+GD pass to capture decoder inputs, predicts dense
-`dW_hat`, applies one R2F update to 3B, and evaluates Base-3B / LoRA-GA+GD-3B /
-R2F-3B on a small subset.
+reuses the saved 3B LoRA GA+GD adapter to capture decoder inputs, predicts
+dense `dW_hat`, applies one R2F update to 3B, and evaluates Base-3B /
+LoRA-GA+GD-3B / R2F-3B on a small subset.
 
 ## Full Run
 

@@ -62,7 +62,6 @@ decoder:
 
 r2f:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/r2f_3b
-  lora_steps: 512
   gradient_capture_steps: 8
   eta_grid:
     - 1.0e-6
@@ -89,7 +88,6 @@ smoke:
     - 0
   coords_per_module: 256
   decoder_steps: 20
-  r2f_lora_steps: 2
   r2f_gradient_capture_steps: 1
   r2f_eta_grid:
     - 1.0e-6
