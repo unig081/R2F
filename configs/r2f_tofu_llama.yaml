@@ -35,7 +35,7 @@ unlearning:
 lora:
   r: 32
   alpha: 32
-  dropout: 0.0
+  dropout: 0.05
 
 decoder_samples:
   max_forget_samples: 512
@@ -61,10 +61,7 @@ r2f:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/r2f_3b
   gradient_capture_steps: 8
   eta_grid:
-    - 1.0e-6
-    - 3.0e-6
-    - 1.0e-5
-    - 3.0e-5
+    - 1.0e-4
   block_rows: 512
   save_updated_model: true
 
