@@ -1,14 +1,26 @@
-data/
-datasets/
-models/
-checkpoints/
-outputs/
-wandb/
-.cache/
+.DS_Store
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime outputs
+cache/
+conda_envs/
+logs/*
+reports/*
+results/*
+!logs/.gitkeep
+!reports/.gitkeep
+!results/.gitkeep
+
+# Large local artifacts
+models/
+datasets/
+checkpoints/
+*.safetensors
 *.pt
 *.pth
-*.safetensors
-.DS_Store
-.env
+*.bin
+*.ckpt

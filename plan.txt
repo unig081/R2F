@@ -1,0 +1,493 @@
+1.已经有了tofu微调过的llama 1B和llama 3B
+2.使用tofu数据集用ga+gd 对llama 1B分别做lora和全参Unlearning
+3.记录lora和全参梯度
+4.用梯度数据训练gradient decoder
+5.用ga+gd对llama 3B做lora微调，记录lora梯度
+6.把lora梯度输入 利用 gradient decoder输出全参梯度
+
+
+R2F TOFU/LLaMA Gradient Decoder 复现计划
+
+核心技术路线固定为 coordinate-wise gradient decoder：
+
+decoder(A[:, i], B[o, :], dA[:, i], dB[o, :], layer 信息, module 类型)
+  -> 预测 Transformer dense weight 梯度 dW[o, i]
+
+这里的“全参梯度”按本实验的可落地定义，统一指 Transformer 内 dense weight 矩阵梯度，不包含 embedding、norm、lm_head。
+
+
+1. 总目标
+
+在远端 GPU 服务器上复现 R2F 的 TOFU/LLaMA 最小可信版本。
+
+- 已有模型: TOFU 微调过的 LLaMA 1B 和 TOFU 微调过的 LLaMA 3B
+- proxy/source model: LLaMA 1B TOFU 模型
+- target model: LLaMA 3B TOFU 模型
+- 数据集: TOFU forget/retain split
+- 训练源: 在 LLaMA 1B 上分别执行 LoRA GA+GD 和 Transformer dense weight GA+GD
+- 监督信号: 1B 上同一批样本、同一 GA+GD loss 下的 LoRA 梯度 dA/dB 与 dense 梯度 dW
+- 迁移目标: 在 LLaMA 3B 上只采集 LoRA 梯度，再通过 gradient decoder 预测 Transformer dense weight 梯度
+- 验收目标: R2F-3B 的 forget 指标优于 3B LoRA GA+GD baseline，同时 retain/model utility 不明显下降
+
+完整链路：
+
+1. 用 TOFU 数据对 LLaMA 1B 做 LoRA GA+GD unlearning，记录 A/B/dA/dB。
+2. 用同一批 TOFU 数据对 LLaMA 1B 做 Transformer dense weight GA+GD unlearning，记录 dW。
+3. 用 1B 的梯度配对样本训练 coordinate-wise gradient decoder。
+4. 用 TOFU 数据对 LLaMA 3B 做 LoRA GA+GD，记录 3B 的 A/B/dA/dB。
+5. 把 3B LoRA 梯度输入 decoder，输出预测的 3B Transformer dense weight 梯度 dW_hat。
+6. 用 dW_hat 更新 LLaMA 3B 的 Transformer dense weights，完成 R2F unlearning。
+
+
+2. 环境与目录约束
+
+所有远端实验文件放在独立目录下，例如：
+
+/mnt/data1/zxc/zxc_r2f
+
+不改全局配置，不写 ~/.bashrc，不改 base conda，不影响实验室其他人。
+
+远端已有 conda 时，使用绝对路径创建项目环境：
+
+source /opt/anaconda3/etc/profile.d/conda.sh
+conda create -y -p /mnt/data1/zxc/zxc_r2f/conda_envs/zxc_r2f python=3.11
+conda activate /mnt/data1/zxc/zxc_r2f/conda_envs/zxc_r2f
+
+项目内环境变量只写到：
+
+/mnt/data1/zxc/zxc_r2f/scripts/env.sh
+
+内容类似：
+
+export R2F_ROOT=/mnt/data1/zxc/zxc_r2f
+export HF_DATASETS_CACHE=$R2F_ROOT/cache/datasets
+export TRANSFORMERS_CACHE=$R2F_ROOT/cache/transformers
+export TORCH_HOME=$R2F_ROOT/cache/torch
+export PIP_CACHE_DIR=$R2F_ROOT/cache/pip
+export PYTHONPATH=$R2F_ROOT/src:$PYTHONPATH
+
+这些变量只在 source scripts/env.sh 后的当前 shell 生效。
+
+推荐目录结构：
+
+/mnt/data1/zxc/zxc_r2f/
+  conda_envs/
+  cache/
+  models/
+    llama_3_2_1B_instruct_tofu/
+    llama_3_2_3B_instruct_tofu/
+  datasets/
+    tofu/
+      forget01.json
+      retain99.json
+      forget05.json
+      retain95.json
+      forget10.json
+      retain90.json
+  src/r2f_tofu/
+    data.py
+    models.py
+    losses.py
+    grad_capture.py
+    decoder.py
+    train_decoder.py
+    unlearn_lora.py
+    unlearn_dense.py
+    apply_r2f.py
+    evaluate_tofu.py
+    metrics.py
+    utils.py
+  configs/
+    r2f_tofu_llama.yaml
+  scripts/
+    env.sh
+    setup_env.sh
+    run_tofu_r2f_smoke.sh
+    run_tofu_r2f_full.sh
+  results/
+    gradients/
+    decoder/
+    r2f_3b/
+  reports/
+  logs/
+
+
+3. 数据集与样本格式
+
+默认主实验使用：
+
+- forget split: datasets/tofu/forget05.json
+- retain split: datasets/tofu/retain95.json
+
+扩展实验再跑：
+
+- forget01 / retain99
+- forget10 / retain90
+
+数据读取统一兼容 json 和 jsonl。每条样本标准化成：
+
+{
+  "question": "...",
+  "answer": "..."
+}
+
+如果原始字段是 answers 或 gold_answers，只取第一个答案作为 answer。
+
+prompt 使用 LLaMA3 chat format，与现有 TOFU 评估保持一致：
+
+<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+训练 labels 只计算 answer token 的 CE loss，prompt 部分 label 置为 -100。
+
+GA+GD 数据配对方式：
+
+- 每个 forget 样本随机配一个 retain 样本。
+- forget batch 和 retain batch 使用同一 tokenizer、同一 max_length。
+- 每个 step 的 loss 固定为：
+
+loss = gamma * (-CE_forget) + alpha * CE_retain
+
+默认：
+
+- gamma = 1.0
+- alpha = 1.0
+- max_length = 1024
+- smoke test 可降到 max_length = 256
+
+
+4. 1B 梯度采集流程
+
+1B 上必须跑两条梯度采集路径：LoRA 路径和 Transformer dense weight 路径。
+
+目标模块固定为：
+
+- q_proj
+- k_proj
+- v_proj
+- o_proj
+- gate_proj
+- up_proj
+- down_proj
+
+LoRA 设置：
+
+- rank r = 8
+- lora_alpha = 16
+- lora_dropout = 0
+- target_modules = q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+
+4.1 LoRA 梯度路径
+
+步骤：
+
+1. 加载 TOFU 微调后的 LLaMA 1B。
+2. 冻结 base model。
+3. 给目标模块注入 LoRA。
+4. 对 TOFU forget/retain batch 计算 GA+GD loss。
+5. backward。
+6. 对每个目标模块记录：
+   - A: LoRA A weight，shape [r, in_dim]
+   - B: LoRA B weight，shape [out_dim, r]
+   - dA: A.grad，shape [r, in_dim]
+   - dB: B.grad，shape [out_dim, r]
+
+4.2 Transformer dense weight 梯度路径
+
+步骤：
+
+1. 加载同一个 TOFU 微调后的 LLaMA 1B。
+2. 不注入 LoRA。
+3. 冻结 embedding、norm、lm_head 和非目标参数。
+4. 只让目标 Transformer dense weight requires_grad=True。
+5. 对同一批 TOFU forget/retain batch 计算同一个 GA+GD loss。
+6. backward。
+7. 对每个目标模块记录：
+   - W: dense weight，shape [out_dim, in_dim]
+   - dW: W.grad，shape [out_dim, in_dim]
+
+4.3 梯度配对样本
+
+对每个目标模块的 dense weight W：
+
+- W shape = [out_dim, in_dim]
+- A shape = [r, in_dim]
+- B shape = [out_dim, r]
+- dA shape = [r, in_dim]
+- dB shape = [out_dim, r]
+- dW shape = [out_dim, in_dim]
+
+随机采样 coordinate (o, i)，构造训练样本：
+
+输入：
+
+- A[:, i]
+- B[o, :]
+- dA[:, i]
+- dB[o, :]
+- layer id
+- relative layer depth
+- module type
+
+标签：
+
+- dW[o, i]
+
+为控制显存和硬盘占用，不保存完整 dW 到硬盘。每个 backward step 中临时拿到 dW 后，立刻采样 coordinate 并写入 compact decoder samples，然后释放梯度。
+
+默认采样规模：
+
+- decoder_train_samples = 512 条 TOFU forget 样本
+- 每个模块每步采样 coords_per_module = 8192
+- batch_size = 1
+- grad_accum_steps = 8
+- epochs = 1 到 3
+- dtype = bf16
+
+输出：
+
+- results/gradients/llama1b_decoder_samples.pt
+- results/gradients/llama1b_grad_stats.json
+
+
+5. Gradient Decoder 结构
+
+decoder 是 coordinate-wise MLP，不一次性输出整张矩阵。
+
+核心输入：
+
+A_col = A[:, i]
+B_row = B[o, :]
+dA_col = dA[:, i]
+dB_row = dB[o, :]
+
+rank-wise interaction features：
+
+- A_col * dB_row
+- B_row * dA_col
+- A_col * B_row
+- dA_col * dB_row
+
+scalar stats：
+
+- rms(A_col)
+- rms(B_row)
+- rms(dA_col)
+- rms(dB_row)
+- dot(A_col, dA_col)
+- dot(B_row, dB_row)
+- dot(A_col, dB_row)
+- dot(B_row, dA_col)
+
+metadata：
+
+- relative_layer_depth
+- sin/cos depth features
+- module_type embedding
+
+MLP：
+
+LayerNorm(input_dim)
+Linear(input_dim, 512)
+GELU
+Dropout(0.05)
+Linear(512, 512)
+GELU
+Dropout(0.05)
+Linear(512, 256)
+GELU
+Linear(256, 1)
+
+输出是 normalized gradient：
+
+pred_norm = decoder(features)
+pred_dW[o, i] = pred_norm * layer_module_grad_rms
+
+训练 loss：
+
+HuberLoss(pred_norm, true_norm)
++ 0.01 * sign_loss
+
+可选加入方向约束：
+
++ 0.1 * cosine_direction_loss
+
+decoder 输出：
+
+- results/decoder/checkpoint.pt
+- results/decoder/stats.json
+- reports/decoder_training_curve.json
+
+
+6. 3B R2F unlearning 流程
+
+在 TOFU 微调后的 LLaMA 3B 上：
+
+1. 加载 LLaMA 3B TOFU 模型。
+2. 注入和 1B 相同 rank、alpha、target_modules 的 LoRA。
+3. 对 TOFU forget/retain batch 计算 GA+GD loss。
+4. backward 后只记录 3B LoRA 的 A/B/dA/dB。
+5. 对每个目标 Transformer dense weight 分块枚举 coordinate (o, i)。
+6. 用 3B 的 A/B/dA/dB 构造 decoder input features。
+7. 加载 1B 训练好的 gradient decoder。
+8. 预测 dW_hat[o, i]。
+9. 按模块反归一化并重建 dense gradient block。
+10. 更新 3B 目标 Transformer dense weights。
+
+更新方向：
+
+如果 dW_hat 是针对 GA+GD loss 的梯度，则使用普通梯度下降形式：
+
+W = W - eta * dW_hat
+
+因为 GA+GD loss 已经写成：
+
+loss = gamma * (-CE_forget) + alpha * CE_retain
+
+对这个 loss 做梯度下降，等价于对 forget 做梯度上升、对 retain 做梯度下降。
+
+学习率网格：
+
+- eta = 1e-6
+- eta = 3e-6
+- eta = 1e-5
+- eta = 3e-5
+
+第一版只更新目标 Transformer dense weights，不更新 embedding、norm、lm_head。
+
+输出：
+
+- results/r2f_3b/dense_delta.pt
+- results/r2f_3b/updated_model/
+- results/r2f_3b/update_stats.json
+
+
+7. Baselines
+
+必须至少比较四组：
+
+1. Base-3B
+
+TOFU 微调后的 LLaMA 3B，不做 unlearning。
+
+2. LoRA-GA+GD-3B
+
+在 LLaMA 3B 上直接用 TOFU forget/retain 做 LoRA GA+GD，只更新 LoRA adapter。
+
+3. Dense-GA+GD-1B
+
+在 LLaMA 1B 上直接更新 Transformer dense weights。用于确认 dense unlearning 梯度本身有效，也作为 decoder 标签来源。
+
+4. R2F-3B
+
+在 LLaMA 3B 上采集 LoRA 梯度，经 decoder 预测 dense 梯度，再更新 Transformer dense weights。
+
+可选补充：
+
+- LoRA-GA+GD-1B，用于验证 1B LoRA 梯度是否能产生有效 unlearning 信号。
+- R2F-3B 不同 eta 网格结果。
+
+
+8. Evaluation
+
+使用 TOFU 风格评估，不使用 multiple-choice accuracy。
+
+forget 指标：
+
+- forget_Q_A_Prob：原答案条件概率，越低越好。
+- forget generation match：生成结果是否仍包含原答案，越低越好。
+
+retain 指标：
+
+- retain_Q_A_Prob：retain answer 概率，越高越好或至少不明显下降。
+- retain generation match：retain 样本回答是否保持。
+- model_utility：综合 retain 保持能力。
+
+每个方法输出：
+
+- results/summary.csv
+- results/predictions.jsonl
+- results/tofu_metrics.json
+- reports/tofu_r2f_summary.md
+
+报告必须包含：
+
+- Base-3B 指标
+- LoRA-GA+GD-3B 指标
+- R2F-3B 指标
+- 5 个 forget before/after 样例
+- 5 个 retain before/after 样例
+- 失败案例分析
+- 显存峰值
+- 运行时间
+
+选择 R2F 最终 checkpoint 的标准：
+
+- forget_Q_A_Prob 比 LoRA-GA+GD-3B 更低
+- retain_Q_A_Prob 或 model_utility 不明显下降
+- 如果多个 eta 满足 retain 约束，选择 forget_Q_A_Prob 最低者
+
+
+9. Smoke Test
+
+第一阶段先跑 smoke test，避免直接上全量。
+
+smoke 配置：
+
+- forget 样本 2 条
+- retain 样本 2 条
+- 只跑 1 个 Transformer layer
+- 只跑 1 到 2 个模块，例如 q_proj 和 v_proj
+- 每个模块采样 128 到 512 个 coordinate
+- decoder 只训练 10 到 20 step
+- 3B 只做一次 R2F dense update
+
+smoke test 必须验证：
+
+- 可以正确读取 TOFU 样本。
+- GA+GD loss 可以正常计算。
+- 1B LoRA 路径能拿到 A/B/dA/dB。
+- 1B dense 路径能拿到 W/dW。
+- coordinate 样本 shape 正确。
+- decoder 能完成一次 forward/backward/update。
+- 3B LoRA 路径能拿到 A/B/dA/dB。
+- 3B dW_hat 能按 block 预测出来。
+- 3B dense weight 能被更新并保存。
+
+
+10. 验收标准
+
+第一版通过标准：
+
+- plan 和代码中不再把主实验写成旧的非 TOFU/LLaMA 主线。
+- 能完整跑通 TOFU/LLaMA smoke test。
+- LLaMA 1B 能生成 paired gradient samples。
+- gradient decoder 能训练并保存 checkpoint。
+- LLaMA 3B 能只凭 LoRA 梯度生成 dense dW_hat。
+- R2F-3B 能保存 dense delta 或 updated model。
+- Base-3B、LoRA-GA+GD-3B、R2F-3B 三组评估结果都能输出。
+- R2F-3B 的 forget 指标优于 LoRA-GA+GD-3B。
+- R2F-3B 的 retain/model utility 不出现明显崩坏。
+- 报告中有清晰 before/after 样例。
+
+shape 验收：
+
+- 对每个目标模块检查 A.shape == [r, in_dim]。
+- 对每个目标模块检查 B.shape == [out_dim, r]。
+- 对每个目标模块检查 dA/dB shape 与 A/B 一致。
+- 对每个目标模块检查 dW.shape == [out_dim, in_dim]。
+- 确认 embedding、norm、lm_head 没有被记录为 dense target，也没有被 R2F 更新。
+
+
+11. 明确假设
+
+- 已经存在 TOFU 微调后的 LLaMA 1B 和 LLaMA 3B，本计划不包含“先把 TOFU 训练进模型”的阶段。
+- “全参 Unlearning”在本计划中按用户修正，定义为 Transformer dense weight unlearning。
+- Transformer dense weight 范围固定为 q_proj、k_proj、v_proj、o_proj、gate_proj、up_proj、down_proj。
+- embedding、norm、lm_head 不参与 dense 梯度记录，不参与 R2F 更新。
+- 默认主实验 split 是 forget05 / retain95。
+- 第一版以跑通梯度配对、decoder 训练、3B R2F 更新和 TOFU 评估为主。
+- 全量多 split、多 eta、多层实验在 smoke test 通过后再扩展。
