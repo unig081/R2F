@@ -14,13 +14,14 @@ if [ ! -f "${CONDA_SH}" ]; then
 fi
 source "${CONDA_SH}"
 
-if ! conda env list | awk -v env="${R2F_CONDA_ENV_NAME}" '$1 == env {found=1} END {exit !found}'; then
-  conda create -y -n "${R2F_CONDA_ENV_NAME}" python=3.11 pip
+mkdir -p "$(dirname "${R2F_CONDA_ENV}")"
+if [ ! -d "${R2F_CONDA_ENV}" ]; then
+  conda create -y -p "${R2F_CONDA_ENV}" python=3.11 pip
 fi
 
-conda env update -n "${R2F_CONDA_ENV_NAME}" -f "${R2F_ROOT}/environment.yml" --prune
+conda env update -p "${R2F_CONDA_ENV}" -f "${R2F_ROOT}/environment.yml" --prune
 set +u
-conda activate "${R2F_CONDA_ENV_NAME}"
+conda activate "${R2F_CONDA_ENV}"
 set -u
 python -m pip install --no-user -e "${R2F_ROOT}"
 python - <<'PY'

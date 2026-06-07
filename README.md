@@ -35,6 +35,7 @@ conda activate zxc_r2f
 ```
 
 The conda environment name is `zxc_r2f`.
+The environment path is `/mnt/data1/conda_env/zxc_r2f` on the GPU server.
 
 ## Smoke Test
 
