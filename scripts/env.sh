@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# This file is meant to be sourced. Do not mutate the caller's shell options.
 
 export R2F_ROOT="${R2F_ROOT:-/mnt/data1/zxc/R2F}"
 export R2F_CONDA_ENV="${R2F_CONDA_ENV:-${R2F_ROOT}/conda_envs/zxc_r2f}"

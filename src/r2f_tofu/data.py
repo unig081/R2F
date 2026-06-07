@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from json import JSONDecodeError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -56,7 +57,12 @@ def load_tofu_file(path: str | Path, limit: int | None = None) -> list[dict[str,
     if path.suffix.lower() == ".jsonl":
         rows = [json.loads(line) for line in text.splitlines() if line.strip()]
     else:
-        payload = json.loads(text)
+        try:
+            payload = json.loads(text)
+        except JSONDecodeError:
+            rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+            samples = [normalize_sample(row) for row in rows if isinstance(row, dict)]
+            return samples[:limit] if limit is not None else samples
         if isinstance(payload, list):
             rows = payload
         elif isinstance(payload, dict):
