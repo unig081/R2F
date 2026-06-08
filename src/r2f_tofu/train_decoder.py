@@ -60,6 +60,63 @@ def _layer_module_grad_rms(samples: dict[str, torch.Tensor]) -> dict[str, float]
     return result
 
 
+def _safe_corrcoef(pred: torch.Tensor, target: torch.Tensor) -> float:
+    pred = pred.float()
+    target = target.float()
+    pred_centered = pred - pred.mean()
+    target_centered = target - target.mean()
+    denom = torch.sqrt(pred_centered.pow(2).sum() * target_centered.pow(2).sum())
+    if float(denom.item()) == 0.0:
+        return 0.0
+    return float((pred_centered * target_centered).sum().div(denom).item())
+
+
+def _prediction_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    sign_threshold: float = 0.0,
+) -> dict[str, float]:
+    pred = pred.float().detach()
+    target = target.float().detach()
+    diff = pred - target
+    mse = diff.pow(2).mean()
+    target_var = target.var(unbiased=False)
+    r2 = 0.0 if float(target_var.item()) == 0.0 else 1.0 - float(mse.div(target_var).item())
+    strong_mask = target.abs() >= float(sign_threshold)
+    if strong_mask.any():
+        sign_acc_strong = (
+            torch.sign(pred[strong_mask]) == torch.sign(target[strong_mask])
+        ).float().mean()
+    else:
+        sign_acc_strong = torch.tensor(0.0, device=pred.device)
+    return {
+        "mse": float(mse.item()),
+        "rmse": float(torch.sqrt(mse).item()),
+        "mae": float(diff.abs().mean().item()),
+        "corr": _safe_corrcoef(pred, target),
+        "r2": r2,
+        "pred_mean": float(pred.mean().item()),
+        "pred_std": float(pred.std(unbiased=False).item()),
+        "target_mean": float(target.mean().item()),
+        "target_std": float(target.std(unbiased=False).item()),
+        "sign_acc": float((torch.sign(pred) == torch.sign(target)).float().mean().item()),
+        "sign_acc_strong": float(sign_acc_strong.item()),
+        "strong_frac": float(strong_mask.float().mean().item()),
+    }
+
+
+def _normalization_stats(samples: dict[str, torch.Tensor]) -> dict[str, Any]:
+    return {
+        "module_grad_rms": _module_grad_rms(samples),
+        "layer_module_grad_rms": _layer_module_grad_rms(samples),
+        "global_grad_rms": float(samples["grad_rms"].float().median().item()),
+    }
+
+
+def _cpu_state_dict(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu() for key, value in model.state_dict().items()}
+
+
 def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
     set_seed(int(cfg.get("seed", 42)))
     sample_path = Path(deep_get(cfg, "decoder_samples.output_path"))
@@ -68,6 +125,17 @@ def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
         max_samples = min(int(max_samples or 16384), 16384)
 
     samples, metadata = load_decoder_sample_tensors(sample_path, max_samples=max_samples)
+    required_projection_keys = {"pinv_dB_norm", "pinv_dA_norm", "pinv_mean_norm", "pinv_diff_norm"}
+    missing_projection = sorted(required_projection_keys - set(samples))
+    if missing_projection:
+        raise ValueError(
+            f"Decoder samples are missing projection_v2 features: {missing_projection}. "
+            "Regenerate samples with r2f_tofu.unlearn_dense."
+        )
+    if metadata.get("feature_version") != "projection_v2":
+        raise ValueError(
+            f"Decoder sample feature_version must be projection_v2, got {metadata.get('feature_version')!r}"
+        )
     n = int(next(iter(samples.values())).shape[0])
     rank = int(samples["A_col"].shape[1])
     num_layers = int(samples["num_layers"].max().item()) if "num_layers" in samples else int(metadata.get("num_layers", 1))
@@ -110,6 +178,47 @@ def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
     max_steps = deep_get(cfg, "decoder.max_steps")
     max_steps = int(max_steps) if max_steps is not None else None
     sign_weight = float(deep_get(cfg, "decoder.sign_loss_weight", 0.01))
+    target_clip = deep_get(cfg, "decoder.target_clip", 8.0)
+    target_clip = float(target_clip) if target_clip is not None else None
+    sign_threshold = float(deep_get(cfg, "decoder.sign_threshold", 0.05))
+    checkpoint_every_steps = max(1, int(deep_get(cfg, "decoder.checkpoint_every_steps", 250)))
+    fail_fast = bool(deep_get(cfg, "decoder.fail_fast_on_weak_baseline", True))
+    baseline_min_corr = float(deep_get(cfg, "decoder.baseline_min_abs_corr", 0.02))
+    baseline_min_sign = float(deep_get(cfg, "decoder.baseline_min_sign_acc", 0.51))
+    checkpoint_path = ensure_parent(deep_get(cfg, "decoder.checkpoint_path"))
+    normalization = _normalization_stats(samples)
+    baseline_metrics = _prediction_metrics(
+        samples["pinv_mean_norm"],
+        samples["target_norm"],
+        sign_threshold=sign_threshold,
+    )
+    if (
+        fail_fast
+        and not smoke
+        and abs(baseline_metrics["corr"]) < baseline_min_corr
+        and baseline_metrics["sign_acc"] < baseline_min_sign
+    ):
+        raise RuntimeError(
+            "Projection baseline is too weak for full decoder training: "
+            f"corr={baseline_metrics['corr']:.4f}, sign_acc={baseline_metrics['sign_acc']:.4f}. "
+            "Regenerate same-state paired samples before training the decoder."
+        )
+
+    def save_checkpoint(complete: bool, reason: str) -> None:
+        checkpoint = {
+            "format": "r2f_gradient_decoder_v1",
+            "complete": bool(complete),
+            "checkpoint_reason": reason,
+            "feature_version": "projection_v2",
+            "model_state": _cpu_state_dict(model),
+            "model_config": model.config_dict(),
+            "normalization": normalization,
+            "metadata": metadata,
+            "train_samples": n,
+            "baseline": baseline_metrics,
+            "curve_tail": curve[-20:],
+        }
+        torch.save(checkpoint, checkpoint_path)
 
     curve: list[dict[str, float]] = []
     step = 0
@@ -121,14 +230,27 @@ def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
             batch = move_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
             pred = model(batch)
-            loss, metrics = decoder_loss(pred, batch["target_norm"], sign_loss_weight=sign_weight)
+            loss, metrics = decoder_loss(
+                pred,
+                batch["target_norm"],
+                sign_loss_weight=sign_weight,
+                target_clip=target_clip,
+                sign_threshold=sign_threshold,
+            )
+            metrics.update(_prediction_metrics(pred, batch["target_norm"], sign_threshold=sign_threshold))
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             metrics["step"] = step
             metrics["epoch"] = epoch + 1
             curve.append(metrics)
-            pbar.set_postfix(loss=f"{metrics['loss']:.4f}", sign=f"{metrics['sign_acc']:.3f}")
+            pbar.set_postfix(
+                loss=f"{metrics['loss']:.4f}",
+                sign=f"{metrics['sign_acc_strong']:.3f}",
+                corr=f"{metrics['corr']:.3f}",
+            )
+            if step % checkpoint_every_steps == 0:
+                save_checkpoint(complete=False, reason=f"step_{step}")
             if max_steps is not None and step >= max_steps:
                 break
         if max_steps is not None and step >= max_steps:
@@ -142,30 +264,31 @@ def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
             for batch in val_loader:
                 batch = move_to_device(batch, device)
                 pred = model(batch)
-                _loss, metrics = decoder_loss(pred, batch["target_norm"], sign_loss_weight=sign_weight)
+                _loss, metrics = decoder_loss(
+                    pred,
+                    batch["target_norm"],
+                    sign_loss_weight=sign_weight,
+                    target_clip=target_clip,
+                    sign_threshold=sign_threshold,
+                )
+                metrics.update(_prediction_metrics(pred, batch["target_norm"], sign_threshold=sign_threshold))
                 vals.append(metrics)
         if vals:
             val_metrics = {
                 f"val_{key}": float(sum(row[key] for row in vals) / len(vals))
-                for key in ("loss", "huber", "sign_loss", "sign_acc")
+                for key in (
+                    "loss",
+                    "huber",
+                    "sign_loss",
+                    "sign_acc",
+                    "sign_acc_strong",
+                    "corr",
+                    "r2",
+                    "pred_std",
+                )
             }
 
-    checkpoint_path = ensure_parent(deep_get(cfg, "decoder.checkpoint_path"))
-    normalization = {
-        "module_grad_rms": _module_grad_rms(samples),
-        "layer_module_grad_rms": _layer_module_grad_rms(samples),
-        "global_grad_rms": float(samples["grad_rms"].float().median().item()),
-    }
-    checkpoint = {
-        "format": "r2f_gradient_decoder_v1",
-        "model_state": model.cpu().state_dict(),
-        "model_config": model.config_dict(),
-        "normalization": normalization,
-        "metadata": metadata,
-        "train_samples": n,
-        "curve_tail": curve[-20:],
-    }
-    torch.save(checkpoint, checkpoint_path)
+    save_checkpoint(complete=True, reason="training_complete")
 
     stats = {
         "checkpoint_path": str(checkpoint_path),
@@ -175,6 +298,9 @@ def train_decoder(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
         "num_layers": num_layers,
         "steps": step,
         "last_train": curve[-1] if curve else {},
+        "baseline": baseline_metrics,
+        "feature_version": "projection_v2",
+        "complete": True,
         **val_metrics,
         "normalization": normalization,
     }

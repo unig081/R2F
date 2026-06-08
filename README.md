@@ -18,10 +18,14 @@
    - 这个 adapter 同时作为 LoRA-GA+GD-3B baseline，也作为第 4 步 R2F 捕获 3B LoRA 梯度的来源。
 
 2. `r2f_tofu.unlearn_dense`：采集 1B LoRA 梯度和 dense 梯度配对样本。
-   - 加载已经 TOFU 微调过的 LLaMA 1B source model 两份。
-   - 第一份注入 LoRA，只记录 LoRA 的 `A/B/dA/dB`。
-   - 第二份不注入 LoRA，只让目标 Transformer dense weights 可训练并记录 `W/dW`。
-   - 两份模型使用同一批 TOFU forget/retain batch 和同一个 GA+GD loss。
+   - 1B LoRA 模型作为唯一训练轨迹，记录当前 state 的 `A/B/dA/dB`。
+   - dense label model 不独立训练；每个梯度累计组开始时同步到当前 LoRA merged state：
+
+     ```text
+     W_eff = W_base + scale * B @ A
+     ```
+
+   - 同一批 TOFU forget/retain batch 和同一个 GA+GD loss 下，dense label model 只做 backward 以记录 `dW` 标签，不执行 optimizer step。
    - 每到梯度累计边界，按 coordinate `(o, i)` 采样并写入 decoder 训练样本：
 
      ```text
@@ -32,26 +36,29 @@
      target_norm = dW[o, i] / grad_rms
      ```
 
+   - 样本还包含 `projection_v2` 解析特征，metadata 标记 `pairing_mode=same_lora_state_merged_dense`。
    - 样本保存到 `results/gradients/`。
 
 3. `r2f_tofu.train_decoder`：训练 coordinate-wise gradient decoder。
    - 读取第 2 步生成的 1B paired gradient samples。
-   - 训练一个 MLP decoder，把 LoRA coordinate 特征映射成 normalized dense gradient。
-   - 输入特征包括 `A_col/B_row/dA_col/dB_row`、rank-wise interaction、RMS/dot 统计量、layer depth 特征和 module embedding。
-   - loss 是 Huber loss 加一个小权重 sign loss。
-   - 保存 decoder checkpoint 到 `results/decoder/checkpoint.pt`，同时保存用于反归一化的 gradient RMS 统计。
+   - decoder 输出 `pinv_mean_norm + MLP_residual(features)`，预测 normalized dense gradient。
+   - 输入特征包括 `A_col/B_row/dA_col/dB_row`、rank-wise interaction、RMS/dot 统计量、`projection_v2` 特征、layer depth 特征和 module embedding。
+   - 训练前计算 projection baseline 的 `corr/sign/R2`；full 模式下 baseline 近随机会 fail-fast。
+   - loss 是 clipped target Huber loss 加 strong-gradient sign loss。
+   - 周期保存 decoder checkpoint；训练完成时 checkpoint 标记 `complete=true`，同时保存用于反归一化的 gradient RMS 统计。
 
 4. `r2f_tofu.apply_r2f`：复用 3B LoRA adapter，预测 3B dense gradient。
    - 加载第 1 步保存的 `results/lora_gagd_3b/adapter`，不重复训练 3B LoRA。
    - 在若干 TOFU forget/retain batch 上执行 GA+GD backward，记录 3B LoRA 的 `A/B/dA/dB`。
-   - 加载第 3 步训练好的 decoder。
+   - 加载第 3 步训练好的 `projection_v2` 且 `complete=true` 的 decoder。
    - 对每个目标 3B Transformer dense weight 按 coordinate block 枚举 `(o, i)`。
    - 用 3B LoRA 梯度构造 decoder 输入，预测并反归一化：
 
      ```text
      dW_hat[o, i] = decoder(features) * grad_rms
      dense_delta = -eta * dW_hat
-     W = W + dense_delta
+     W_eff = W_base + scale * B @ A
+     W_out = W_eff + dense_delta
      ```
 
    - 预测出的 dense gradient shards 保存到

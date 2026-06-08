@@ -9,14 +9,27 @@ import torch
 from .module_keys import ModuleKey, parse_module_key
 from .utils import ensure_dir, ensure_parent, tensor_rms, write_json
 
+DECODER_FEATURE_VERSION = "projection_v2"
 
-def capture_lora_gradients(
+
+def lora_scale_from_module(module: torch.nn.Module) -> float:
+    scaling = getattr(module, "scaling", 1.0)
+    if isinstance(scaling, dict):
+        if "default" in scaling:
+            return float(scaling["default"])
+        if scaling:
+            return float(next(iter(scaling.values())))
+        return 1.0
+    return float(scaling)
+
+
+def find_lora_target_modules(
     model: torch.nn.Module,
     target_modules: list[str],
     train_layers: list[int] | None = None,
     train_modules: list[str] | None = None,
-) -> dict[ModuleKey, dict[str, torch.Tensor]]:
-    records: dict[ModuleKey, dict[str, torch.Tensor]] = {}
+) -> dict[ModuleKey, torch.nn.Module]:
+    modules: dict[ModuleKey, torch.nn.Module] = {}
     layer_filter = set(train_layers) if train_layers is not None else None
     module_filter = set(train_modules) if train_modules is not None else None
 
@@ -30,7 +43,79 @@ def capture_lora_gradients(
             continue
         if module_filter is not None and key.module_type not in module_filter:
             continue
+        modules[key] = module
 
+    if not modules:
+        raise RuntimeError("No LoRA target modules were found")
+    return modules
+
+
+def _regularized_inverse(gram: torch.Tensor, ridge: float) -> torch.Tensor:
+    gram = gram.float()
+    eye = torch.eye(gram.shape[0], device=gram.device, dtype=torch.float32)
+    ridge_scale = gram.diag().abs().mean().clamp_min(1e-12)
+    mat = gram + float(ridge) * ridge_scale * eye
+    try:
+        return torch.linalg.inv(mat)
+    except RuntimeError:
+        return torch.linalg.pinv(mat)
+
+
+def compute_projection_features(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    da: torch.Tensor,
+    db: torch.Tensor,
+    o_idx: torch.Tensor,
+    i_idx: torch.Tensor,
+    grad_rms: torch.Tensor,
+    scale: float,
+    ridge: float = 1e-4,
+) -> dict[str, torch.Tensor]:
+    a = a.float()
+    b = b.float()
+    da = da.float()
+    db = db.float()
+    scale = max(float(scale), 1e-12)
+
+    inv_aat = _regularized_inverse(a @ a.T, ridge)
+    inv_btb = _regularized_inverse(b.T @ b, ridge)
+
+    a_col = a[:, i_idx].transpose(0, 1).contiguous()
+    b_row = b[o_idx, :].contiguous()
+    da_col = da[:, i_idx].transpose(0, 1).contiguous()
+    db_row = db[o_idx, :].contiguous()
+    grad_rms = grad_rms.float().clamp_min(1e-12)
+    if grad_rms.ndim == 0:
+        grad_rms = grad_rms.expand(len(o_idx))
+
+    pinv_db = ((db_row @ inv_aat) * a_col).sum(dim=-1) / scale
+    pinv_da = ((b_row @ inv_btb) * da_col).sum(dim=-1) / scale
+    pinv_db_norm = pinv_db / grad_rms
+    pinv_da_norm = pinv_da / grad_rms
+    pinv_mean_norm = 0.5 * (pinv_db_norm + pinv_da_norm)
+    pinv_diff_norm = pinv_db_norm - pinv_da_norm
+    return {
+        "pinv_dB_norm": pinv_db_norm.contiguous(),
+        "pinv_dA_norm": pinv_da_norm.contiguous(),
+        "pinv_mean_norm": pinv_mean_norm.contiguous(),
+        "pinv_diff_norm": pinv_diff_norm.contiguous(),
+    }
+
+
+def capture_lora_gradients(
+    model: torch.nn.Module,
+    target_modules: list[str],
+    train_layers: list[int] | None = None,
+    train_modules: list[str] | None = None,
+) -> dict[ModuleKey, dict[str, torch.Tensor]]:
+    records: dict[ModuleKey, dict[str, torch.Tensor]] = {}
+    for key, module in find_lora_target_modules(
+        model,
+        target_modules=target_modules,
+        train_layers=train_layers,
+        train_modules=train_modules,
+    ).items():
         lora_a = module.lora_A["default"]
         lora_b = module.lora_B["default"]
         if lora_a.weight.grad is None or lora_b.weight.grad is None:
@@ -40,6 +125,7 @@ def capture_lora_gradients(
             "B": lora_b.weight.detach().float().cpu(),
             "dA": lora_a.weight.grad.detach().float().cpu(),
             "dB": lora_b.weight.grad.detach().float().cpu(),
+            "scale": torch.tensor(lora_scale_from_module(module), dtype=torch.float32),
         }
 
     if not records:
@@ -82,12 +168,14 @@ def sample_coordinates_for_module(
     coords_per_module: int,
     num_layers: int,
     seed: int,
+    projection_ridge: float = 1e-4,
 ) -> dict[str, torch.Tensor]:
     _assert_pair_shapes(key, lora, dense)
     a = lora["A"]
     b = lora["B"]
     da = lora["dA"]
     db = lora["dB"]
+    scale = float(lora.get("scale", torch.tensor(1.0)).item())
     dw = dense["dW"]
 
     out_dim, in_dim = dw.shape
@@ -100,6 +188,17 @@ def sample_coordinates_for_module(
     grad_rms = tensor_rms(dw).clamp_min(1e-12)
     target_raw = dw[o_idx, i_idx].float()
     target_norm = target_raw / grad_rms
+    projection = compute_projection_features(
+        a=a,
+        b=b,
+        da=da,
+        db=db,
+        o_idx=o_idx,
+        i_idx=i_idx,
+        grad_rms=grad_rms,
+        scale=scale,
+        ridge=projection_ridge,
+    )
 
     return {
         "A_col": a[:, i_idx].transpose(0, 1).contiguous(),
@@ -114,6 +213,8 @@ def sample_coordinates_for_module(
         "coord_o": o_idx.long(),
         "coord_i": i_idx.long(),
         "num_layers": torch.full((n,), num_layers, dtype=torch.long),
+        "lora_scale": torch.full((n,), scale, dtype=torch.float32),
+        **projection,
     }
 
 
@@ -123,6 +224,7 @@ def sample_paired_gradients(
     coords_per_module: int,
     num_layers: int,
     seed: int,
+    projection_ridge: float = 1e-4,
 ) -> dict[str, torch.Tensor]:
     chunks: list[dict[str, torch.Tensor]] = []
     for offset, key in enumerate(sorted(lora_records, key=lambda x: (x.layer_idx, x.module_type))):
@@ -136,6 +238,7 @@ def sample_paired_gradients(
                 coords_per_module=coords_per_module,
                 num_layers=num_layers,
                 seed=seed + offset * 1009,
+                projection_ridge=projection_ridge,
             )
         )
     if not chunks:
@@ -161,6 +264,7 @@ class DecoderSampleWriter:
             stem = stem[:-3]
         self.chunk_dir = ensure_dir(self.output_path.parent / f"{stem}_chunks")
         self.metadata = metadata
+        self.metadata.setdefault("feature_version", DECODER_FEATURE_VERSION)
         self.flush_every_steps = max(int(flush_every_steps), 1)
         self.buffer: list[dict[str, torch.Tensor]] = []
         self.chunks: list[str] = []
@@ -254,6 +358,7 @@ def shape_report_from_records(
             "B": list(rec["B"].shape),
             "dA": list(rec["dA"].shape),
             "dB": list(rec["dB"].shape),
+            "scale": float(rec.get("scale", torch.tensor(1.0)).item()),
         }
         if dense_records and key in dense_records:
             item["W"] = list(dense_records[key]["W"].shape)

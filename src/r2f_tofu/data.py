@@ -181,9 +181,10 @@ def build_paired_loader(
     batch_size: int,
     max_forget_samples: int | None,
     seed: int,
+    max_retain_samples: int | None = None,
 ) -> torch.utils.data.DataLoader:
     forget_samples = load_tofu_file(forget_file, limit=max_forget_samples)
-    retain_samples = load_tofu_file(retain_file)
+    retain_samples = load_tofu_file(retain_file, limit=max_retain_samples)
     dataset = PairedTOFUDataset(forget_samples, retain_samples, max_forget_samples, seed=seed)
     collator = DataCollatorForR2F(tokenizer=tokenizer, max_length=max_length)
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator)

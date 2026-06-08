@@ -10,9 +10,12 @@ from tqdm import tqdm
 from .config import apply_smoke_overrides, deep_get, load_config
 from .data import build_paired_loader
 from .grad_capture import (
+    DECODER_FEATURE_VERSION,
     DecoderSampleWriter,
     capture_dense_gradients,
     capture_lora_gradients,
+    find_lora_target_modules,
+    lora_scale_from_module,
     sample_paired_gradients,
     save_shape_report,
     shape_report_from_records,
@@ -37,6 +40,25 @@ from .utils import (
 )
 
 
+def _sync_dense_params_from_lora_state(
+    lora_modules: dict[Any, torch.nn.Module],
+    dense_params: dict[Any, torch.nn.Parameter],
+) -> None:
+    with torch.no_grad():
+        for key, param in dense_params.items():
+            if key not in lora_modules:
+                continue
+            module = lora_modules[key]
+            base_layer = getattr(module, "base_layer", module)
+            if not hasattr(base_layer, "weight"):
+                raise ValueError(f"LoRA module {key.as_string()} does not expose a base weight")
+            base = base_layer.weight.detach().to(device=param.device, dtype=torch.float32)
+            a = module.lora_A["default"].weight.detach().to(device=param.device, dtype=torch.float32)
+            b = module.lora_B["default"].weight.detach().to(device=param.device, dtype=torch.float32)
+            merged = torch.addmm(base, b, a, alpha=lora_scale_from_module(module))
+            param.data.copy_(merged.to(dtype=param.dtype))
+
+
 def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
     set_seed(int(cfg.get("seed", 42)))
 
@@ -48,7 +70,10 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
     train_modules = deep_get(cfg, "unlearning.train_modules")
     max_steps = int(deep_get(cfg, "unlearning.max_steps", 512))
     max_forget_samples = int(deep_get(cfg, "decoder_samples.max_forget_samples", max_steps))
+    max_retain_samples = deep_get(cfg, "unlearning.max_retain_samples")
     coords_per_module = int(deep_get(cfg, "decoder_samples.coords_per_module", 8192))
+    projection_ridge = float(deep_get(cfg, "decoder.projection_ridge", 1e-4))
+    deterministic_capture = bool(deep_get(cfg, "decoder_samples.deterministic_capture", True))
     batch_size = int(deep_get(cfg, "unlearning.batch_size", 1))
     max_length = int(deep_get(cfg, "model.max_length", 1024))
     grad_accum_steps = max(1, int(deep_get(cfg, "unlearning.grad_accum_steps", 1)))
@@ -65,6 +90,7 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
         batch_size=batch_size,
         max_forget_samples=max_forget_samples,
         seed=int(cfg.get("seed", 42)),
+        max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
     )
 
     common_model_kwargs = {
@@ -88,6 +114,12 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
         train_layers=train_layers,
         train_modules=train_modules,
     )
+    lora_modules = find_lora_target_modules(
+        lora_model,
+        target_modules=target_modules,
+        train_layers=train_layers,
+        train_modules=train_modules,
+    )
     lora_trainable = [p for p in lora_model.parameters() if p.requires_grad]
     lora_optimizer = torch.optim.AdamW(
         lora_trainable,
@@ -100,11 +132,6 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
         target_modules=target_modules,
         train_layers=train_layers,
         train_modules=train_modules,
-    )
-    dense_trainable = [p for p in dense_model.parameters() if p.requires_grad]
-    dense_optimizer = torch.optim.AdamW(
-        dense_trainable,
-        lr=float(deep_get(cfg, "unlearning.learning_rate", 3e-5)),
     )
 
     num_layers = infer_num_layers(dense_model)
@@ -120,6 +147,10 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
             "rank": int(deep_get(cfg, "lora.r", 8)),
             "num_layers": num_layers,
             "coords_per_module": coords_per_module,
+            "pairing_mode": "same_lora_state_merged_dense",
+            "feature_version": DECODER_FEATURE_VERSION,
+            "projection_ridge": projection_ridge,
+            "deterministic_capture": deterministic_capture,
             "smoke": smoke,
         },
         flush_every_steps=int(deep_get(cfg, "decoder_samples.flush_every_steps", 8)),
@@ -134,13 +165,21 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
     total_micro_steps = min(len(loader), max_steps)
     optimizer_steps = 0
 
-    lora_model.train()
-    dense_model.train()
+    if deterministic_capture:
+        lora_model.eval()
+        dense_model.eval()
+    else:
+        lora_model.train()
+        dense_model.train()
     lora_optimizer.zero_grad(set_to_none=True)
-    dense_optimizer.zero_grad(set_to_none=True)
+    dense_model.zero_grad(set_to_none=True)
     for step, batch in enumerate(tqdm(loader, desc="1B paired gradient capture"), start=1):
         if step > max_steps:
             break
+
+        if not group_lora_metrics:
+            _sync_dense_params_from_lora_state(lora_modules, dense_params)
+            dense_model.zero_grad(set_to_none=True)
 
         lora_batch = move_to_device(batch, lora_device)
         lora_loss, lora_metrics = ga_gd_loss(
@@ -180,6 +219,7 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
             coords_per_module=coords_per_module,
             num_layers=num_layers,
             seed=int(cfg.get("seed", 42)) + (optimizer_steps + 1) * 7919,
+            projection_ridge=projection_ridge,
         )
         writer.add(samples)
 
@@ -192,11 +232,9 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
             shape_report_written = True
 
         torch.nn.utils.clip_grad_norm_(lora_trainable, 1.0)
-        torch.nn.utils.clip_grad_norm_(dense_trainable, 1.0)
         lora_optimizer.step()
-        dense_optimizer.step()
         lora_optimizer.zero_grad(set_to_none=True)
-        dense_optimizer.zero_grad(set_to_none=True)
+        dense_model.zero_grad(set_to_none=True)
         optimizer_steps += 1
 
         def mean_metric(rows: list[dict[str, float]], key: str) -> float:
@@ -229,6 +267,10 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
         "losses_tail": losses[-20:],
         "target_modules": target_modules,
         "train_layers": train_layers,
+        "pairing_mode": "same_lora_state_merged_dense",
+        "feature_version": DECODER_FEATURE_VERSION,
+        "projection_ridge": projection_ridge,
+        "deterministic_capture": deterministic_capture,
         "smoke": smoke,
         **cuda_memory_summary(),
     }

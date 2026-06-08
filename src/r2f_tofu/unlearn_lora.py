@@ -40,6 +40,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
     train_modules = deep_get(cfg, "unlearning.train_modules")
     max_steps = int(deep_get(cfg, "unlearning.max_steps", 512))
     max_forget_samples = deep_get(cfg, "decoder_samples.max_forget_samples")
+    max_retain_samples = deep_get(cfg, "unlearning.max_retain_samples")
     batch_size = int(deep_get(cfg, "unlearning.batch_size", 1))
     max_length = int(deep_get(cfg, "model.max_length", 1024))
     grad_accum_steps = max(1, int(deep_get(cfg, "unlearning.grad_accum_steps", 1)))
@@ -59,6 +60,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
         batch_size=batch_size,
         max_forget_samples=int(max_forget_samples) if max_forget_samples is not None else None,
         seed=int(cfg.get("seed", 42)),
+        max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
     )
 
     base = load_causal_lm(

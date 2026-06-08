@@ -18,14 +18,19 @@ class GradientDecoder(nn.Module):
         module_embedding_dim: int = 16,
         hidden_dim: int = 512,
         dropout: float = 0.05,
+        use_projection_residual: bool = True,
     ) -> None:
         super().__init__()
         self.rank = int(rank)
         self.num_modules = int(num_modules)
         self.num_layers = int(num_layers)
         self.module_embedding_dim = int(module_embedding_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.dropout = float(dropout)
+        self.use_projection_residual = bool(use_projection_residual)
         self.module_embedding = nn.Embedding(num_modules, module_embedding_dim)
-        input_dim = self.rank * 8 + 8 + 3 + module_embedding_dim
+        self.projection_feature_dim = 4
+        input_dim = self.rank * 8 + 8 + 3 + module_embedding_dim + self.projection_feature_dim
         self.net = nn.Sequential(
             nn.LayerNorm(input_dim),
             nn.Linear(input_dim, hidden_dim),
@@ -75,19 +80,34 @@ class GradientDecoder(nn.Module):
         rel, depth_sin, depth_cos = sine_cosine_depth(layer_idx, num_layers)
         depth = torch.stack([rel, depth_sin, depth_cos], dim=-1).to(a.device)
         module_emb = self.module_embedding(batch["module_id"].long().to(a.device))
-        return torch.cat([a, b, da, db, *interactions, stats, depth, module_emb], dim=-1)
+        projection = torch.stack(
+            [
+                batch["pinv_dB_norm"].float(),
+                batch["pinv_dA_norm"].float(),
+                batch["pinv_mean_norm"].float(),
+                batch["pinv_diff_norm"].float(),
+            ],
+            dim=-1,
+        ).to(a.device)
+        return torch.cat([a, b, da, db, *interactions, stats, depth, module_emb, projection], dim=-1)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        return self.net(self.build_features(batch)).squeeze(-1)
+        residual = self.net(self.build_features(batch)).squeeze(-1)
+        if not self.use_projection_residual:
+            return residual
+        return batch["pinv_mean_norm"].float().to(residual.device) + residual
 
     def config_dict(self) -> dict[str, Any]:
-        first_linear = next(m for m in self.net if isinstance(m, nn.Linear))
         return {
             "rank": self.rank,
             "num_modules": self.num_modules,
             "num_layers": self.num_layers,
             "module_embedding_dim": self.module_embedding_dim,
-            "hidden_dim": first_linear.out_features,
+            "hidden_dim": self.hidden_dim,
+            "dropout": self.dropout,
+            "feature_version": "projection_v2",
+            "projection_feature_dim": self.projection_feature_dim,
+            "use_projection_residual": self.use_projection_residual,
         }
 
 
@@ -99,16 +119,35 @@ def decoder_loss(
     pred_norm: torch.Tensor,
     target_norm: torch.Tensor,
     sign_loss_weight: float = 0.01,
+    target_clip: float | None = None,
+    sign_threshold: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     target_norm = target_norm.float()
-    huber = nn.functional.huber_loss(pred_norm.float(), target_norm, delta=1.0)
-    sign_loss = nn.functional.softplus(-pred_norm.float() * target_norm).mean()
+    pred_norm = pred_norm.float()
+    if target_clip is not None and float(target_clip) > 0:
+        target_for_loss = target_norm.clamp(-float(target_clip), float(target_clip))
+    else:
+        target_for_loss = target_norm
+    huber = nn.functional.huber_loss(pred_norm, target_for_loss, delta=1.0)
+    strong_mask = target_norm.abs() >= float(sign_threshold)
+    if strong_mask.any():
+        sign_loss = nn.functional.softplus(-pred_norm[strong_mask] * target_for_loss[strong_mask]).mean()
+    else:
+        sign_loss = pred_norm.sum() * 0.0
     loss = huber + sign_loss_weight * sign_loss
     with torch.no_grad():
         sign_acc = (torch.sign(pred_norm) == torch.sign(target_norm)).float().mean()
+        if strong_mask.any():
+            sign_acc_strong = (
+                torch.sign(pred_norm[strong_mask]) == torch.sign(target_norm[strong_mask])
+            ).float().mean()
+        else:
+            sign_acc_strong = torch.tensor(0.0, device=pred_norm.device)
     return loss, {
         "loss": float(loss.detach().cpu()),
         "huber": float(huber.detach().cpu()),
         "sign_loss": float(sign_loss.detach().cpu()),
         "sign_acc": float(sign_acc.detach().cpu()),
+        "sign_acc_strong": float(sign_acc_strong.detach().cpu()),
+        "strong_frac": float(strong_mask.float().mean().detach().cpu()),
     }

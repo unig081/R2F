@@ -41,6 +41,7 @@ decoder_samples:
   max_forget_samples: 512
   coords_per_module: 8192
   flush_every_steps: 8
+  deterministic_capture: true
   output_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/gradients/llama1b_decoder_samples.pt
   stats_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/gradients/llama1b_grad_stats.json
 
@@ -55,7 +56,14 @@ decoder:
   hidden_dim: 512
   module_embedding_dim: 16
   dropout: 0.05
+  projection_ridge: 1.0e-4
+  target_clip: 8.0
+  sign_threshold: 0.05
   sign_loss_weight: 0.01
+  checkpoint_every_steps: 250
+  fail_fast_on_weak_baseline: true
+  baseline_min_abs_corr: 0.02
+  baseline_min_sign_acc: 0.51
 
 r2f:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/r2f_3b
@@ -64,6 +72,8 @@ r2f:
     - 1.0e-4
   block_rows: 512
   save_updated_model: true
+  deterministic_capture: true
+  allow_incomplete_decoder: false
 
 evaluation:
   output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/eval

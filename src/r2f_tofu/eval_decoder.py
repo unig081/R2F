@@ -28,6 +28,8 @@ def _load_decoder_checkpoint(path: str | Path) -> dict[str, Any]:
 
 def _build_decoder(ckpt: dict[str, Any], rank: int, num_layers: int, cfg: dict[str, Any]) -> GradientDecoder:
     model_cfg = dict(ckpt.get("model_config") or {})
+    if ckpt.get("feature_version") != "projection_v2" and model_cfg.get("feature_version") != "projection_v2":
+        raise ValueError("Decoder checkpoint is not projection_v2; retrain the decoder.")
     model = GradientDecoder(
         rank=int(model_cfg.get("rank", rank)),
         num_modules=int(model_cfg.get("num_modules", 7)),
@@ -37,6 +39,7 @@ def _build_decoder(ckpt: dict[str, Any], rank: int, num_layers: int, cfg: dict[s
         ),
         hidden_dim=int(model_cfg.get("hidden_dim", deep_get(cfg, "decoder.hidden_dim", 512))),
         dropout=float(deep_get(cfg, "decoder.dropout", 0.05)),
+        use_projection_residual=bool(model_cfg.get("use_projection_residual", True)),
     )
     model.load_state_dict(ckpt["model_state"])
     return model
@@ -68,7 +71,11 @@ def _safe_corrcoef(pred: torch.Tensor, target: torch.Tensor) -> float:
     return float((pred_centered * target_centered).sum().div(denom).item())
 
 
-def _regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+def _regression_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    sign_threshold: float = 0.05,
+) -> dict[str, float]:
     pred = pred.float()
     target = target.float()
     diff = pred - target
@@ -76,12 +83,22 @@ def _regression_metrics(pred: torch.Tensor, target: torch.Tensor) -> dict[str, f
     mae = diff.abs().mean()
     target_var = target.var(unbiased=False)
     r2 = 0.0 if float(target_var.item()) == 0.0 else 1.0 - float(mse.div(target_var).item())
+    strong_mask = target.abs() >= float(sign_threshold)
+    if strong_mask.any():
+        sign_acc_strong = (
+            torch.sign(pred[strong_mask]) == torch.sign(target[strong_mask])
+        ).float().mean()
+    else:
+        sign_acc_strong = torch.tensor(0.0)
     return {
         "mse": float(mse.item()),
         "rmse": float(torch.sqrt(mse).item()),
         "mae": float(mae.item()),
         "corr": _safe_corrcoef(pred, target),
         "r2": r2,
+        "sign_acc": float((torch.sign(pred) == torch.sign(target)).float().mean().item()),
+        "sign_acc_strong": float(sign_acc_strong.item()),
+        "strong_frac": float(strong_mask.float().mean().item()),
         "pred_mean": float(pred.mean().item()),
         "pred_std": float(pred.std(unbiased=False).item()),
         "target_mean": float(target.mean().item()),
@@ -101,7 +118,12 @@ def _mean_metrics(rows: list[dict[str, float]]) -> dict[str, float]:
     }
 
 
-def _module_metrics(pred: torch.Tensor, target: torch.Tensor, module_ids: torch.Tensor) -> dict[str, dict[str, float]]:
+def _module_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    module_ids: torch.Tensor,
+    sign_threshold: float,
+) -> dict[str, dict[str, float]]:
     result: dict[str, dict[str, float]] = {}
     for module_id in sorted(module_ids.long().unique().tolist()):
         mask = module_ids.long() == int(module_id)
@@ -110,7 +132,7 @@ def _module_metrics(pred: torch.Tensor, target: torch.Tensor, module_ids: torch.
         module = ID_TO_MODULE.get(int(module_id), str(module_id))
         result[module] = {
             "samples": int(mask.sum().item()),
-            **_regression_metrics(pred[mask], target[mask]),
+            **_regression_metrics(pred[mask], target[mask], sign_threshold=sign_threshold),
         }
     return result
 
@@ -120,6 +142,8 @@ def _evaluate_dataset(
     dataset: Dataset[Any],
     batch_size: int,
     sign_loss_weight: float,
+    target_clip: float | None,
+    sign_threshold: float,
     device: torch.device,
     desc: str,
 ) -> dict[str, Any]:
@@ -127,6 +151,7 @@ def _evaluate_dataset(
     loss_rows: list[dict[str, float]] = []
     preds: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
+    baselines: list[torch.Tensor] = []
     module_ids: list[torch.Tensor] = []
 
     model.eval()
@@ -134,20 +159,38 @@ def _evaluate_dataset(
         for batch in tqdm(loader, desc=desc):
             batch = move_to_device(batch, device)
             pred = model(batch)
-            _loss, loss_metrics = decoder_loss(pred, batch["target_norm"], sign_loss_weight=sign_loss_weight)
+            _loss, loss_metrics = decoder_loss(
+                pred,
+                batch["target_norm"],
+                sign_loss_weight=sign_loss_weight,
+                target_clip=target_clip,
+                sign_threshold=sign_threshold,
+            )
             loss_rows.append(loss_metrics)
             preds.append(pred.detach().cpu())
             targets.append(batch["target_norm"].detach().cpu())
+            baselines.append(batch["pinv_mean_norm"].detach().cpu())
             module_ids.append(batch["module_id"].detach().cpu())
 
     pred_all = torch.cat(preds, dim=0)
     target_all = torch.cat(targets, dim=0)
+    baseline_all = torch.cat(baselines, dim=0)
     module_id_all = torch.cat(module_ids, dim=0)
     return {
         "samples": int(target_all.numel()),
         **_mean_metrics(loss_rows),
-        **_regression_metrics(pred_all, target_all),
-        "by_module": _module_metrics(pred_all, target_all, module_id_all),
+        **_regression_metrics(pred_all, target_all, sign_threshold=sign_threshold),
+        "baseline_pinv_mean": _regression_metrics(
+            baseline_all,
+            target_all,
+            sign_threshold=sign_threshold,
+        ),
+        "residual": _regression_metrics(
+            pred_all - baseline_all,
+            target_all - baseline_all,
+            sign_threshold=sign_threshold,
+        ),
+        "by_module": _module_metrics(pred_all, target_all, module_id_all, sign_threshold=sign_threshold),
     }
 
 
@@ -166,6 +209,12 @@ def eval_decoder(
         max_samples = min(int(max_samples or 16384), 16384)
 
     samples, metadata = load_decoder_sample_tensors(sample_path, max_samples=max_samples)
+    required_projection_keys = {"pinv_dB_norm", "pinv_dA_norm", "pinv_mean_norm", "pinv_diff_norm"}
+    missing_projection = sorted(required_projection_keys - set(samples))
+    if missing_projection:
+        raise ValueError(f"Decoder samples are missing projection_v2 features: {missing_projection}")
+    if metadata.get("feature_version") != "projection_v2":
+        raise ValueError(f"Decoder samples are not projection_v2: {metadata.get('feature_version')!r}")
     n = int(next(iter(samples.values())).shape[0])
     rank = int(samples["A_col"].shape[1])
     num_layers = int(samples["num_layers"].max().item()) if "num_layers" in samples else int(metadata.get("num_layers", 1))
@@ -179,6 +228,9 @@ def eval_decoder(
 
     batch_size = int(deep_get(cfg, "decoder.batch_size", 8192))
     sign_weight = float(deep_get(cfg, "decoder.sign_loss_weight", 0.01))
+    target_clip_cfg = deep_get(cfg, "decoder.target_clip", 8.0)
+    target_clip = float(target_clip_cfg) if target_clip_cfg is not None else None
+    sign_threshold = float(deep_get(cfg, "decoder.sign_threshold", 0.05))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -188,6 +240,8 @@ def eval_decoder(
             dataset=split,
             batch_size=batch_size,
             sign_loss_weight=sign_weight,
+            target_clip=target_clip,
+            sign_threshold=sign_threshold,
             device=device,
             desc=f"eval decoder {name}",
         )

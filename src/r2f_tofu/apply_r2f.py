@@ -11,7 +11,13 @@ from tqdm import tqdm
 from .config import apply_smoke_overrides, deep_get, load_config
 from .data import build_paired_loader
 from .decoder import GradientDecoder
-from .grad_capture import capture_lora_gradients, save_shape_report, shape_report_from_records
+from .grad_capture import (
+    DECODER_FEATURE_VERSION,
+    capture_lora_gradients,
+    compute_projection_features,
+    save_shape_report,
+    shape_report_from_records,
+)
 from .losses import ga_gd_loss
 from .models import (
     get_model_device,
@@ -34,17 +40,30 @@ from .utils import (
 def _load_decoder(
     checkpoint_path: str | Path,
     device: torch.device,
+    allow_incomplete: bool = False,
 ) -> tuple[GradientDecoder, dict[str, Any]]:
     ckpt = torch.load(checkpoint_path, map_location="cpu")
     if ckpt.get("format") != "r2f_gradient_decoder_v1":
         raise ValueError(f"Unsupported decoder checkpoint: {checkpoint_path}")
     model_cfg = ckpt["model_config"]
+    feature_version = ckpt.get("feature_version") or model_cfg.get("feature_version")
+    if feature_version != DECODER_FEATURE_VERSION:
+        raise ValueError(
+            f"Decoder checkpoint feature_version must be {DECODER_FEATURE_VERSION}, got {feature_version!r}"
+        )
+    if not allow_incomplete and not bool(ckpt.get("complete", False)):
+        raise ValueError(
+            f"Decoder checkpoint is incomplete: {checkpoint_path}. "
+            "Retrain the decoder to completion or set r2f.allow_incomplete_decoder=true."
+        )
     decoder = GradientDecoder(
         rank=int(model_cfg["rank"]),
         num_modules=int(model_cfg.get("num_modules", 7)),
         num_layers=int(model_cfg.get("num_layers", 1)),
         module_embedding_dim=int(model_cfg.get("module_embedding_dim", 16)),
         hidden_dim=int(model_cfg.get("hidden_dim", 512)),
+        dropout=float(model_cfg.get("dropout", 0.05)),
+        use_projection_residual=bool(model_cfg.get("use_projection_residual", True)),
     )
     decoder.load_state_dict(ckpt["model_state"])
     decoder.to(device)
@@ -99,12 +118,14 @@ def _predict_and_update_param(
     eta: float,
     target_num_layers: int,
     block_rows: int,
+    projection_ridge: float,
     gradient_path: Path,
 ) -> dict[str, Any]:
     a = lora["A"]
     b = lora["B"]
     da = lora["dA"]
     db = lora["dB"]
+    scale = float(lora.get("scale", torch.tensor(1.0)).item())
     out_dim, in_dim = tuple(param.shape)
     if a.shape[1] != in_dim or b.shape[0] != out_dim:
         raise ValueError(
@@ -135,7 +156,21 @@ def _predict_and_update_param(
                 "layer_idx": torch.full((len(o_idx),), key.layer_idx, dtype=torch.long),
                 "module_id": torch.full((len(o_idx),), key.module_id, dtype=torch.long),
                 "num_layers": torch.full((len(o_idx),), target_num_layers, dtype=torch.long),
+                "lora_scale": torch.full((len(o_idx),), scale, dtype=torch.float32),
             }
+            batch.update(
+                compute_projection_features(
+                    a=a,
+                    b=b,
+                    da=da,
+                    db=db,
+                    o_idx=o_idx,
+                    i_idx=i_idx,
+                    grad_rms=torch.full((len(o_idx),), grad_rms, dtype=torch.float32),
+                    scale=scale,
+                    ridge=projection_ridge,
+                )
+            )
             batch = move_to_device(batch, device)
             pred_norm = decoder(batch)
             d_w = (pred_norm.float().cpu() * grad_rms).reshape(
@@ -172,6 +207,25 @@ def _predict_and_update_param(
     }
 
 
+def _merge_lora_records_into_dense_params(
+    dense_params: dict[ModuleKey, torch.nn.Parameter],
+    lora_records: dict[ModuleKey, dict[str, torch.Tensor]],
+) -> int:
+    merged = 0
+    with torch.no_grad():
+        for key, param in dense_params.items():
+            if key not in lora_records:
+                continue
+            rec = lora_records[key]
+            a = rec["A"].to(device=param.device, dtype=torch.float32)
+            b = rec["B"].to(device=param.device, dtype=torch.float32)
+            scale = float(rec.get("scale", torch.tensor(1.0)).item())
+            delta = torch.matmul(b, a).mul_(scale)
+            param.data.add_(delta.to(dtype=param.dtype))
+            merged += 1
+    return merged
+
+
 def _load_and_capture_target_lora_gradients(
     cfg: dict[str, Any],
 ) -> tuple[dict[ModuleKey, dict[str, torch.Tensor]], int, dict[str, Any]]:
@@ -186,6 +240,7 @@ def _load_and_capture_target_lora_gradients(
     capture_steps = int(
         deep_get(cfg, "r2f.gradient_capture_steps", deep_get(cfg, "unlearning.grad_accum_steps", 1))
     )
+    max_retain_samples = deep_get(cfg, "unlearning.max_retain_samples")
     if capture_steps < 1:
         raise ValueError("r2f.gradient_capture_steps must be >= 1")
     if not (adapter_dir / "adapter_config.json").exists():
@@ -230,10 +285,15 @@ def _load_and_capture_target_lora_gradients(
         batch_size=int(deep_get(cfg, "unlearning.batch_size", 1)),
         max_forget_samples=capture_steps,
         seed=int(cfg.get("seed", 42)) + 1009,
+        max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
     )
     total_capture_steps = min(len(capture_loader), capture_steps)
     capture_losses: list[dict[str, float]] = []
-    lora_model.train()
+    deterministic_capture = bool(deep_get(cfg, "r2f.deterministic_capture", True))
+    if deterministic_capture:
+        lora_model.eval()
+    else:
+        lora_model.train()
     lora_model.zero_grad(set_to_none=True)
     capture_iter = tqdm(capture_loader, desc="3B LoRA gradient capture from saved adapter")
     for step, batch in enumerate(capture_iter, start=1):
@@ -266,6 +326,7 @@ def _load_and_capture_target_lora_gradients(
         "adapter_dir": str(adapter_dir),
         "adapter_source": "results/lora_gagd_3b/adapter",
         "gradient_capture_steps": total_capture_steps,
+        "deterministic_capture": deterministic_capture,
         "capture_losses": capture_losses,
         "captured_modules": [
             key.as_string()
@@ -284,7 +345,11 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
     set_seed(int(cfg.get("seed", 42)))
     output_dir = ensure_dir(deep_get(cfg, "r2f.output_dir"))
     decoder_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    decoder, checkpoint = _load_decoder(deep_get(cfg, "decoder.checkpoint_path"), decoder_device)
+    decoder, checkpoint = _load_decoder(
+        deep_get(cfg, "decoder.checkpoint_path"),
+        decoder_device,
+        allow_incomplete=bool(deep_get(cfg, "r2f.allow_incomplete_decoder", False)),
+    )
 
     (
         lora_records,
@@ -297,6 +362,7 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
     train_layers = deep_get(cfg, "unlearning.train_layers")
     train_modules = deep_get(cfg, "unlearning.train_modules")
     block_rows = int(deep_get(cfg, "r2f.block_rows", 512))
+    projection_ridge = float(deep_get(cfg, "decoder.projection_ridge", 1e-4))
     save_updated_model = bool(deep_get(cfg, "r2f.save_updated_model", True))
 
     eta_stats: list[dict[str, Any]] = []
@@ -322,6 +388,7 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
             train_layers=train_layers,
             train_modules=train_modules,
         )
+        merged_modules = _merge_lora_records_into_dense_params(dense_params, lora_records)
         module_stats: list[dict[str, Any]] = []
         for key, param in tqdm(
             sorted(dense_params.items(), key=lambda item: (item[0].layer_idx, item[0].module_type)),
@@ -340,6 +407,7 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
                     eta=eta,
                     target_num_layers=target_num_layers,
                     block_rows=block_rows,
+                    projection_ridge=projection_ridge,
                     gradient_path=gradient_path,
                 )
             )
@@ -350,6 +418,8 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
             "target_model": target_model,
             "target_num_layers": target_num_layers,
             "delta_formula": "dense_delta = -eta * dW_hat",
+            "base_state": "lora_merged",
+            "merged_lora_modules": merged_modules,
             "modules": module_stats,
         }
         torch.save(manifest, eta_dir / "dense_gradient.pt")
@@ -366,6 +436,8 @@ def apply_r2f(cfg: dict[str, Any], smoke: bool = False) -> dict[str, Any]:
             "dense_gradient_manifest": str(eta_dir / "dense_gradient.pt"),
             "dense_delta_manifest": str(eta_dir / "dense_delta.pt"),
             "updated_model_dir": str(updated_model_dir) if save_updated_model else None,
+            "base_state": "lora_merged",
+            "merged_lora_modules": merged_modules,
             "modules_updated": len(module_stats),
             "module_stats": module_stats,
             "smoke": smoke,

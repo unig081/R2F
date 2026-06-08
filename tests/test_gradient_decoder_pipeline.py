@@ -37,6 +37,8 @@ class GradientDecoderPipelineTest(unittest.TestCase):
         self.assertEqual(samples["A_col"].shape, (7, rank))
         self.assertEqual(samples["B_row"].shape, (7, rank))
         self.assertEqual(samples["target_norm"].shape, (7,))
+        self.assertEqual(samples["pinv_mean_norm"].shape, (7,))
+        self.assertIn("pinv_dB_norm", samples)
 
         decoder = GradientDecoder(rank=rank, num_layers=2, hidden_dim=128)
         pred = decoder(samples)
@@ -56,7 +58,7 @@ class GradientDecoderPipelineTest(unittest.TestCase):
             "dA": torch.ones(rank, in_dim),
             "dB": torch.ones(out_dim, rank),
         }
-        decoder = GradientDecoder(rank=rank, num_layers=1, hidden_dim=128)
+        decoder = GradientDecoder(rank=rank, num_layers=1, hidden_dim=128, use_projection_residual=False)
         with torch.no_grad():
             for param in decoder.parameters():
                 param.zero_()
@@ -79,6 +81,7 @@ class GradientDecoderPipelineTest(unittest.TestCase):
                 eta=0.1,
                 target_num_layers=1,
                 block_rows=2,
+                projection_ridge=1e-4,
                 gradient_path=gradient_path,
             )
             shard = torch.load(gradient_path, map_location="cpu")
