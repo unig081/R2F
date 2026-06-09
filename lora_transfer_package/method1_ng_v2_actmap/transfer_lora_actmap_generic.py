@@ -579,6 +579,9 @@ def main():
 
     # ── Save adapter ──
     print(f"\nSaving {len(new_lora)} tensors to {args.output_dir} …")
+    # Duplicate target layers can intentionally reuse transformed source tensors.
+    # safetensors rejects shared storage, so detach each entry before writing.
+    new_lora = {k: v.clone().contiguous() for k, v in new_lora.items()}
     save_file(new_lora, os.path.join(args.output_dir, "adapter_model.safetensors"))
 
     # Collect target module names from output keys
