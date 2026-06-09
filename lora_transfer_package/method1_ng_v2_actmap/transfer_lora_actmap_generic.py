@@ -203,6 +203,15 @@ def compute_head_similarity(W_q_old, W_k_old, W_v_old, W_o_old,
         qk_new.append(qk.flatten())
     qk_new = torch.stack(qk_new)
 
+    if qk_old.shape[1] != qk_new.shape[1]:
+        common_dim = max(qk_old.shape[1], qk_new.shape[1])
+        qk_old = F.interpolate(
+            qk_old.unsqueeze(0), size=common_dim, mode="linear", align_corners=False
+        ).squeeze(0)
+        qk_new = F.interpolate(
+            qk_new.unsqueeze(0), size=common_dim, mode="linear", align_corners=False
+        ).squeeze(0)
+
     # Cosine similarity
     qk_old_n = F.normalize(qk_old.float(), dim=1)
     qk_new_n = F.normalize(qk_new.float(), dim=1)
