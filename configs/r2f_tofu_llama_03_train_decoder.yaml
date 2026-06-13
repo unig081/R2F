@@ -15,28 +15,6 @@ model:
   trust_remote_code: true
   max_length: 1024
 
-unlearning:
-  gamma: 1.0
-  alpha: 1.0
-  batch_size: 1
-  grad_accum_steps: 8
-  epochs: 1
-  learning_rate: 3.0e-5
-  lora_learning_rate: 1.0e-4
-  max_steps: 512
-  target_modules:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-  train_layers: null
-  train_modules: null
-
-lora:
-  r: 32
-  alpha: 64
-  dropout: 0.05
-
 decoder_samples:
   max_forget_samples: 512
   coords_per_module: 8192
@@ -65,37 +43,9 @@ decoder:
   baseline_min_abs_corr: 0.02
   baseline_min_sign_acc: 0.51
 
-r2f:
-  output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/r2f_3b
-  gradient_capture_steps: 8
-  eta_grid:
-    - 1.0e-4
-  block_rows: 512
-  save_updated_model: true
-  deterministic_capture: true
-  allow_incomplete_decoder: false
-
-evaluation:
-  output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/eval
-  max_forget: 100
-  max_retain: 100
-  max_new_tokens: 64
-
 smoke:
   max_length: 256
   max_forget_samples: 2
-  max_retain_samples: 2
-  target_modules:
-    - q_proj
-    - k_proj
-    - v_proj
-    - o_proj
-  train_layers:
-    - 0
   coords_per_module: 256
   decoder_steps: 20
-  r2f_gradient_capture_steps: 1
-  r2f_eta_grid:
-    - 1.0e-6
-  eval_max_forget: 2
-  eval_max_retain: 2
+

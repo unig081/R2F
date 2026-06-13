@@ -37,14 +37,6 @@ lora:
   alpha: 64
   dropout: 0.05
 
-decoder_samples:
-  max_forget_samples: 512
-  coords_per_module: 8192
-  flush_every_steps: 8
-  deterministic_capture: true
-  output_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/gradients/llama1b_decoder_samples.pt
-  stats_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/gradients/llama1b_grad_stats.json
-
 decoder:
   checkpoint_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/decoder/checkpoint.pt
   stats_path: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/decoder/stats.json
@@ -75,12 +67,6 @@ r2f:
   deterministic_capture: true
   allow_incomplete_decoder: false
 
-evaluation:
-  output_dir: ${R2F_OUTPUT_DIR:/mnt/data1/zxc/R2F/results}/eval
-  max_forget: 100
-  max_retain: 100
-  max_new_tokens: 64
-
 smoke:
   max_length: 256
   max_forget_samples: 2
@@ -92,10 +78,7 @@ smoke:
     - o_proj
   train_layers:
     - 0
-  coords_per_module: 256
-  decoder_steps: 20
   r2f_gradient_capture_steps: 1
   r2f_eta_grid:
     - 1.0e-6
-  eval_max_forget: 2
-  eval_max_retain: 2
+
