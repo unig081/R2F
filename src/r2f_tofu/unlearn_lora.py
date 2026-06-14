@@ -39,6 +39,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
     train_layers = deep_get(cfg, "unlearning.train_layers")
     train_modules = deep_get(cfg, "unlearning.train_modules")
     max_steps = int(deep_get(cfg, "unlearning.max_steps", 512))
+    epochs = max(1, int(deep_get(cfg, "unlearning.epochs", 1)))
     max_forget_samples = deep_get(cfg, "decoder_samples.max_forget_samples")
     max_retain_samples = deep_get(cfg, "unlearning.max_retain_samples")
     batch_size = int(deep_get(cfg, "unlearning.batch_size", 1))
@@ -96,42 +97,53 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
     losses: list[dict[str, float]] = []
     shape_report_written = False
     model.train()
-    total_steps = min(len(loader), max_steps)
+    total_steps = min(len(loader) * epochs, max_steps)
     optimizer_steps = 0
     optimizer.zero_grad(set_to_none=True)
-    for step, batch in enumerate(tqdm(loader, desc="LoRA-GA+GD-3B"), start=1):
-        if step > max_steps:
-            break
-        batch = move_to_device(batch, device)
-        loss, metrics = ga_gd_loss(
-            model,
-            batch,
-            gamma=float(deep_get(cfg, "unlearning.gamma", 1.0)),
-            alpha=float(deep_get(cfg, "unlearning.alpha", 1.0)),
-        )
-        group_size = accumulation_group_size(step, total_steps, grad_accum_steps)
-        (loss / group_size).backward()
-        if not shape_report_written:
-            lora_records = capture_lora_gradients(
-                model,
-                target_modules=target_modules,
-                train_layers=train_layers,
-                train_modules=train_modules,
-            )
-            save_shape_report(
-                output_dir / "lora_shape_report.json",
-                shape_report_from_records(lora_records),
-            )
-            shape_report_written = True
-        if is_accumulation_boundary(step, total_steps, grad_accum_steps):
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            optimizer_steps += 1
-        metrics["step"] = step
-        metrics["optimizer_steps"] = optimizer_steps
-        metrics["grad_accum_group_size"] = group_size
-        losses.append(metrics)
+    step = 0
+    progress = tqdm(total=total_steps, desc="LoRA-GA+GD-3B")
+    try:
+        for epoch in range(1, epochs + 1):
+            for batch in loader:
+                if step >= max_steps:
+                    break
+                step += 1
+                batch = move_to_device(batch, device)
+                loss, metrics = ga_gd_loss(
+                    model,
+                    batch,
+                    gamma=float(deep_get(cfg, "unlearning.gamma", 1.0)),
+                    alpha=float(deep_get(cfg, "unlearning.alpha", 1.0)),
+                )
+                group_size = accumulation_group_size(step, total_steps, grad_accum_steps)
+                (loss / group_size).backward()
+                if not shape_report_written:
+                    lora_records = capture_lora_gradients(
+                        model,
+                        target_modules=target_modules,
+                        train_layers=train_layers,
+                        train_modules=train_modules,
+                    )
+                    save_shape_report(
+                        output_dir / "lora_shape_report.json",
+                        shape_report_from_records(lora_records),
+                    )
+                    shape_report_written = True
+                if is_accumulation_boundary(step, total_steps, grad_accum_steps):
+                    torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    optimizer_steps += 1
+                metrics["step"] = step
+                metrics["epoch"] = epoch
+                metrics["optimizer_steps"] = optimizer_steps
+                metrics["grad_accum_group_size"] = group_size
+                losses.append(metrics)
+                progress.update(1)
+            if step >= max_steps:
+                break
+    finally:
+        progress.close()
 
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
@@ -140,6 +152,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
         "steps": len(losses),
         "optimizer_steps": optimizer_steps,
         "grad_accum_steps": grad_accum_steps,
+        "epochs": epochs,
         "last_loss": losses[-1] if losses else {},
         "losses_tail": losses[-20:],
         "target_modules": target_modules,
