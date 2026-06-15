@@ -6,17 +6,10 @@ R2F_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export R2F_ROOT
 source "${SCRIPT_DIR}/env.sh"
 
-CONFIG="${1:-${R2F_ROOT}/configs/r2f_tofu_llama.yaml}"
-LOG_DIR="${R2F_ROOT}/logs"
-mkdir -p "${LOG_DIR}"
+CONFIG="${1:-${R2F_ROOT}/configs/r2f_tofu.yaml}"
 
-python -m r2f_tofu.unlearn_lora --config "${CONFIG}" \
-  2>&1 | tee "${LOG_DIR}/full_01_lora_3b.log"
-python -m r2f_tofu.unlearn_dense --config "${CONFIG}" \
-  2>&1 | tee "${LOG_DIR}/full_02_dense_1b_samples.log"
-python -m r2f_tofu.train_decoder --config "${CONFIG}" \
-  2>&1 | tee "${LOG_DIR}/full_03_train_decoder.log"
-python -m r2f_tofu.apply_r2f --config "${CONFIG}" \
-  2>&1 | tee "${LOG_DIR}/full_04_apply_r2f.log"
-python -m r2f_tofu.evaluate_tofu --config "${CONFIG}" \
-  2>&1 | tee "${LOG_DIR}/full_05_eval.log"
+"${SCRIPT_DIR}/run_tofu_r2f_01_lora.sh" "${CONFIG}"
+"${SCRIPT_DIR}/run_tofu_r2f_02_dense_samples.sh" "${CONFIG}"
+"${SCRIPT_DIR}/run_tofu_r2f_03_train_decoder.sh" "${CONFIG}"
+"${SCRIPT_DIR}/run_tofu_r2f_04_apply_r2f.sh" "${CONFIG}"
+"${SCRIPT_DIR}/run_tofu_r2f_05_eval.sh" "${CONFIG}"

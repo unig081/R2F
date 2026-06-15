@@ -1,0 +1,70 @@
+root: ${R2F_ROOT:.}
+seed: 0
+model_family: ${R2F_MODEL_FAMILY:llama}  # llama -> Llama 3.2; phi -> Phi-4; qwen -> Qwen3
+
+paths:
+  output_dir: ${R2F_OUTPUT_DIR:results}
+  model_path: ${R2F_TRAIN_MODEL:}
+
+model:
+  dtype: bfloat16
+  device_map: null
+  attn_implementation: null
+  trust_remote_code: true
+  max_length: 512
+
+train:
+  # Empty means: use the local model directory selected by model_family under model/proxy/.
+  # Set R2F_TRAIN_MODEL or this field to train any other Hugging Face/local causal LM.
+  model_name_or_path: ${R2F_TRAIN_MODEL:}
+  output_dir: ${R2F_TRAIN_OUTPUT_DIR:}
+
+  tofu_split: ${R2F_TOFU_SPLIT:full}
+  tofu_data_dir: ${R2F_TOFU_DATA_DIR:dataset/TOFU}
+  data_file: ${R2F_TRAIN_DATA_FILE:}
+  max_train_samples: null
+  max_eval_samples: 0
+
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 4
+  num_train_epochs: 5
+  max_steps: -1
+  learning_rate: 1.0e-5
+  lr_scheduler_type: linear
+  warmup_epochs: 1.0
+  warmup_steps: null
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+
+  bf16: true
+  bf16_full_eval: true
+  fp16: false
+  gradient_checkpointing: true
+  optim: paged_adamw_32bit
+  deepspeed: null
+
+  do_eval: false
+  eval_strategy: "no"
+  eval_steps: null
+  logging_steps: 5
+  logging_strategy: steps
+  save_strategy: "no"
+  save_steps: 500
+  save_total_limit: null
+  save_safetensors: true
+  save_only_model: true
+  overwrite_output_dir: false
+
+  remove_unused_columns: true
+  dataloader_num_workers: 0
+  dataloader_pin_memory: true
+  group_by_length: false
+  report_to:
+    - tensorboard
+  run_name: ${R2F_TRAIN_RUN_NAME:}
+  load_best_model_at_end: false
+  ddp_find_unused_parameters: true

@@ -63,6 +63,7 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
     set_seed(int(cfg.get("seed", 42)))
 
     source_model = str(deep_get(cfg, "paths.source_model"))
+    model_family = str(deep_get(cfg, "model.family", deep_get(cfg, "model_family", "llama")))
     forget_file = str(deep_get(cfg, "paths.forget_file"))
     retain_file = str(deep_get(cfg, "paths.retain_file"))
     target_modules = list(deep_get(cfg, "unlearning.target_modules"))
@@ -91,6 +92,7 @@ def capture_1b_decoder_samples(cfg: dict[str, Any], smoke: bool = False) -> dict
         max_forget_samples=max_forget_samples,
         seed=int(cfg.get("seed", 42)),
         max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
+        model_family=model_family,
     )
 
     common_model_kwargs = {

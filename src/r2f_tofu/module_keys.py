@@ -10,6 +10,7 @@ DEFAULT_TARGET_MODULES = (
     "k_proj",
     "v_proj",
     "o_proj",
+    "qkv_proj",
     "gate_proj",
     "up_proj",
     "down_proj",

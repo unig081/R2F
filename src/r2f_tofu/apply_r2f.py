@@ -230,6 +230,7 @@ def _load_and_capture_target_lora_gradients(
     cfg: dict[str, Any],
 ) -> tuple[dict[ModuleKey, dict[str, torch.Tensor]], int, dict[str, Any]]:
     target_model = str(deep_get(cfg, "paths.target_model"))
+    model_family = str(deep_get(cfg, "model.family", deep_get(cfg, "model_family", "llama")))
     forget_file = str(deep_get(cfg, "paths.forget_file"))
     retain_file = str(deep_get(cfg, "paths.retain_file"))
     target_modules = list(deep_get(cfg, "unlearning.target_modules"))
@@ -286,6 +287,7 @@ def _load_and_capture_target_lora_gradients(
         max_forget_samples=capture_steps,
         seed=int(cfg.get("seed", 42)) + 1009,
         max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
+        model_family=model_family,
     )
     total_capture_steps = min(len(capture_loader), capture_steps)
     capture_losses: list[dict[str, float]] = []

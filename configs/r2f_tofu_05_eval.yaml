@@ -1,0 +1,34 @@
+root: ${R2F_ROOT:.}
+seed: 42
+model_family: ${R2F_MODEL_FAMILY:llama}  # llama -> Llama 3.2; phi -> Phi-4; qwen -> Qwen3
+
+paths:
+  target_model: ${R2F_TARGET_MODEL:}
+  forget_file: ${R2F_FORGET_FILE:dataset/TOFU/forget05.json}
+  retain_file: ${R2F_RETAIN_FILE:dataset/TOFU/retain95.json}
+  output_dir: ${R2F_OUTPUT_DIR:results}
+
+model:
+  dtype: bfloat16
+  device_map: auto
+  attn_implementation: null
+  trust_remote_code: true
+  max_length: 1024
+
+r2f:
+  output_dir: ${R2F_OUTPUT_DIR:results}/r2f_3b
+  gradient_capture_steps: 8
+  eta_grid:
+    - 1.0e-4
+  block_rows: 512
+  save_updated_model: true
+  deterministic_capture: true
+  allow_incomplete_decoder: false
+
+evaluation:
+  output_dir: ${R2F_OUTPUT_DIR:results}/eval
+  tofu_data_dir: ${R2F_TOFU_DATA_DIR:dataset/TOFU}
+  forget_split: forget05
+  holdout_split: holdout05
+  question_key: question
+  batch_size: 32

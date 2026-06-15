@@ -1,0 +1,29 @@
+root: ${R2F_ROOT:.}
+seed: 42
+model_family: ${R2F_MODEL_FAMILY:llama}  # llama -> Llama 3.2; phi -> Phi-4; qwen -> Qwen3
+
+decoder_samples:
+  output_path: ${R2F_OUTPUT_DIR:results}/gradients/llama1b_decoder_samples.pt
+
+decoder:
+  checkpoint_path: ${R2F_OUTPUT_DIR:results}/decoder/checkpoint.pt
+  stats_path: ${R2F_OUTPUT_DIR:results}/decoder/stats.json
+  curve_path: ${R2F_ROOT:.}/reports/decoder_training_curve.json
+  batch_size: 8192
+  epochs: 1
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  hidden_dim: 512
+  module_embedding_dim: 16
+  dropout: 0.05
+  projection_ridge: 1.0e-4
+  target_clip: 8.0
+  sign_threshold: 0.05
+  sign_loss_weight: 0.01
+  checkpoint_every_steps: 250
+  fail_fast_on_weak_baseline: true
+  baseline_min_abs_corr: 0.02
+  baseline_min_sign_acc: 0.51
+
+smoke:
+  decoder_steps: 20

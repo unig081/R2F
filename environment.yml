@@ -22,3 +22,6 @@ dependencies:
       - sentencepiece
       - protobuf
       - pandas
+      - rouge-score
+      - scipy
+      - scikit-learn

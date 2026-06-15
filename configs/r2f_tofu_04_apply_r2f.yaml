@@ -1,0 +1,53 @@
+root: ${R2F_ROOT:.}
+seed: 42
+model_family: ${R2F_MODEL_FAMILY:llama}  # llama -> Llama 3.2; phi -> Phi-4; qwen -> Qwen3
+
+paths:
+  target_model: ${R2F_TARGET_MODEL:}
+  forget_file: ${R2F_FORGET_FILE:dataset/TOFU/forget05.json}
+  retain_file: ${R2F_RETAIN_FILE:dataset/TOFU/retain95.json}
+  output_dir: ${R2F_OUTPUT_DIR:results}
+
+model:
+  dtype: bfloat16
+  device_map: auto
+  attn_implementation: null
+  trust_remote_code: true
+  max_length: 1024
+
+unlearning:
+  gamma: 1.0
+  alpha: 1.0
+  batch_size: 1
+  grad_accum_steps: 8
+  target_modules: null
+  train_layers: null
+  train_modules: null
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+
+decoder:
+  checkpoint_path: ${R2F_OUTPUT_DIR:results}/decoder/checkpoint.pt
+  projection_ridge: 1.0e-4
+
+r2f:
+  output_dir: ${R2F_OUTPUT_DIR:results}/r2f_3b
+  gradient_capture_steps: 8
+  eta_grid:
+    - 1.0e-4
+  block_rows: 512
+  save_updated_model: true
+  deterministic_capture: true
+  allow_incomplete_decoder: false
+
+smoke:
+  max_length: 256
+  max_retain_samples: 2
+  train_layers:
+    - 0
+  r2f_gradient_capture_steps: 1
+  r2f_eta_grid:
+    - 1.0e-6

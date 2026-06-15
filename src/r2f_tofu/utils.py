@@ -3,9 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
-import os
 import random
-import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -107,20 +105,6 @@ def accumulation_group_size(step: int, total_steps: int, grad_accum_steps: int) 
 def is_accumulation_boundary(step: int, total_steps: int, grad_accum_steps: int) -> bool:
     grad_accum_steps = max(int(grad_accum_steps), 1)
     return int(step) % grad_accum_steps == 0 or int(step) >= int(total_steps)
-
-
-class Timer:
-    def __init__(self) -> None:
-        self.start = time.time()
-
-    def elapsed(self) -> float:
-        return time.time() - self.start
-
-    def elapsed_str(self) -> str:
-        seconds = int(self.elapsed())
-        minutes, sec = divmod(seconds, 60)
-        hours, minutes = divmod(minutes, 60)
-        return f"{hours:02d}:{minutes:02d}:{sec:02d}"
 
 
 def sine_cosine_depth(layer_idx: torch.Tensor, num_layers: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

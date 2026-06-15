@@ -10,6 +10,8 @@ from typing import Any, Sequence
 import torch
 from torch.utils.data import Dataset
 
+from .model_families import chat_template_kwargs
+
 IGNORE_INDEX = -100
 SYSTEM_PROMPT = "You are a helpful assistant."
 
@@ -92,10 +94,56 @@ def tokenize_qa(
     sample: dict[str, str],
     max_length: int,
     add_eos: bool = True,
+    model_family: str = "llama",
 ) -> dict[str, torch.Tensor]:
-    prompt = build_llama3_prompt(sample["question"])
-    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-    answer_ids = tokenizer(sample["answer"], add_special_tokens=False)["input_ids"]
+    chat = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+    prompt_chat = chat[:-1]
+    kwargs = chat_template_kwargs(model_family)
+    if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
+        try:
+            full_ids = tokenizer.apply_chat_template(
+                chat,
+                tokenize=True,
+                add_generation_prompt=False,
+                **kwargs,
+            )
+            prompt_ids = tokenizer.apply_chat_template(
+                prompt_chat,
+                tokenize=True,
+                add_generation_prompt=True,
+                **kwargs,
+            )
+        except TypeError:
+            full_ids = tokenizer.apply_chat_template(
+                chat,
+                tokenize=True,
+                add_generation_prompt=False,
+            )
+            prompt_ids = tokenizer.apply_chat_template(
+                prompt_chat,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+        if torch.is_tensor(full_ids):
+            full_ids = full_ids.tolist()
+        if torch.is_tensor(prompt_ids):
+            prompt_ids = prompt_ids.tolist()
+        if full_ids and isinstance(full_ids[0], list):
+            full_ids = full_ids[0]
+        if prompt_ids and isinstance(prompt_ids[0], list):
+            prompt_ids = prompt_ids[0]
+        answer_ids = list(full_ids[len(prompt_ids):])
+    else:
+        prompt = build_llama3_prompt(sample["question"])
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(sample["answer"], add_special_tokens=False)["input_ids"]
+    if add_eos and tokenizer.eos_token_id is not None:
+        if answer_ids and answer_ids[-1] == tokenizer.eos_token_id:
+            add_eos = False
     if add_eos and tokenizer.eos_token_id is not None:
         answer_ids = answer_ids + [tokenizer.eos_token_id]
 
@@ -145,6 +193,7 @@ class PairedTOFUDataset(Dataset):
 class DataCollatorForR2F:
     tokenizer: Any
     max_length: int
+    model_family: str = "llama"
 
     def _pad(self, rows: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -161,7 +210,10 @@ class DataCollatorForR2F:
         return {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask}
 
     def _collate_samples(self, samples: Sequence[dict[str, str]]) -> dict[str, torch.Tensor]:
-        tokenized = [tokenize_qa(self.tokenizer, sample, self.max_length) for sample in samples]
+        tokenized = [
+            tokenize_qa(self.tokenizer, sample, self.max_length, model_family=self.model_family)
+            for sample in samples
+        ]
         return self._pad(tokenized)
 
     def __call__(self, instances: Sequence[Any]) -> dict[str, Any]:
@@ -182,9 +234,14 @@ def build_paired_loader(
     max_forget_samples: int | None,
     seed: int,
     max_retain_samples: int | None = None,
+    model_family: str = "llama",
 ) -> torch.utils.data.DataLoader:
     forget_samples = load_tofu_file(forget_file, limit=max_forget_samples)
     retain_samples = load_tofu_file(retain_file, limit=max_retain_samples)
     dataset = PairedTOFUDataset(forget_samples, retain_samples, max_forget_samples, seed=seed)
-    collator = DataCollatorForR2F(tokenizer=tokenizer, max_length=max_length)
+    collator = DataCollatorForR2F(
+        tokenizer=tokenizer,
+        max_length=max_length,
+        model_family=model_family,
+    )
     return torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator)

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 
 from .config import apply_smoke_overrides, deep_get, load_config

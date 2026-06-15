@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .model_families import default_model_path, get_model_family, normalize_family_name
+
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
 
@@ -35,6 +37,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(cfg, dict):
         raise ValueError(f"Config must be a mapping: {path}")
     cfg["_config_path"] = str(path)
+    apply_model_family_defaults(cfg)
     return cfg
 
 
@@ -53,6 +56,51 @@ def deep_set(cfg: dict[str, Any], path: str, value: Any) -> None:
     for key in keys[:-1]:
         node = node.setdefault(key, {})
     node[keys[-1]] = value
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _looks_like_other_family_path(value: Any, family: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    lowered = value.lower()
+    markers = {
+        "llama": ("llama", "llama3"),
+        "phi": ("phi", "phi4"),
+        "qwen": ("qwen", "qwen3"),
+    }
+    return any(
+        marker in lowered
+        for other, other_markers in markers.items()
+        if other != family
+        for marker in other_markers
+    )
+
+
+def apply_model_family_defaults(cfg: dict[str, Any]) -> None:
+    family_name = normalize_family_name(deep_get(cfg, "model_family", deep_get(cfg, "model.family", "llama")))
+    family = get_model_family(family_name)
+    root = deep_get(cfg, "root", ".")
+    deep_set(cfg, "model_family", family_name)
+    deep_set(cfg, "model.family", family_name)
+    deep_set(cfg, "model.family_name", family.display_name)
+    if _is_missing(deep_get(cfg, "model.trust_remote_code")):
+        deep_set(cfg, "model.trust_remote_code", family.trust_remote_code)
+    if _is_missing(deep_get(cfg, "model.attn_implementation")) and family.attn_implementation:
+        deep_set(cfg, "model.attn_implementation", family.attn_implementation)
+
+    source_model = deep_get(cfg, "paths.source_model")
+    if _is_missing(source_model) or _looks_like_other_family_path(source_model, family_name):
+        deep_set(cfg, "paths.source_model", default_model_path(root, family_name, "proxy"))
+    target_model = deep_get(cfg, "paths.target_model")
+    if _is_missing(target_model) or _looks_like_other_family_path(target_model, family_name):
+        deep_set(cfg, "paths.target_model", default_model_path(root, family_name, "target"))
+
+    target_modules = deep_get(cfg, "unlearning.target_modules")
+    if _is_missing(target_modules):
+        deep_set(cfg, "unlearning.target_modules", list(family.target_modules))
 
 
 def apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -85,10 +133,3 @@ def apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
     if "max_retain_samples" in smoke:
         deep_set(cfg, "unlearning.max_retain_samples", smoke["max_retain_samples"])
     return cfg
-
-
-def resolve_output_path(cfg: dict[str, Any], path: str) -> Path:
-    value = deep_get(cfg, path)
-    if value is None:
-        raise KeyError(path)
-    return Path(str(value)).expanduser()

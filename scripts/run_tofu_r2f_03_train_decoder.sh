@@ -6,7 +6,7 @@ R2F_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export R2F_ROOT
 source "${SCRIPT_DIR}/env.sh"
 
-CONFIG="${1:-${R2F_ROOT}/configs/r2f_tofu_llama_03_train_decoder.yaml}"
+CONFIG="${1:-${R2F_ROOT}/configs/r2f_tofu_03_train_decoder.yaml}"
 LOG_DIR="${R2F_ROOT}/logs"
 mkdir -p "${LOG_DIR}"
 

@@ -33,6 +33,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
     set_seed(int(cfg.get("seed", 42)))
 
     target_model = str(deep_get(cfg, "paths.target_model"))
+    model_family = str(deep_get(cfg, "model.family", deep_get(cfg, "model_family", "llama")))
     forget_file = str(deep_get(cfg, "paths.forget_file"))
     retain_file = str(deep_get(cfg, "paths.retain_file"))
     target_modules = list(deep_get(cfg, "unlearning.target_modules"))
@@ -62,6 +63,7 @@ def train_lora_baseline(cfg: dict[str, Any], smoke: bool = False) -> dict[str, A
         max_forget_samples=int(max_forget_samples) if max_forget_samples is not None else None,
         seed=int(cfg.get("seed", 42)),
         max_retain_samples=int(max_retain_samples) if max_retain_samples is not None else None,
+        model_family=model_family,
     )
 
     base = load_causal_lm(
