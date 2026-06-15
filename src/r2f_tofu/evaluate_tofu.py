@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,8 +33,13 @@ logger = logging.getLogger("r2f_tofu.evaluate_tofu")
 
 
 def _load_json_rows(path: Path) -> list[dict[str, Any]]:
-    with path.open("r", encoding="utf-8-sig") as f:
-        payload = json.load(f)
+    text = path.read_text(encoding="utf-8-sig").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except JSONDecodeError:
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
     if isinstance(payload, dict):
